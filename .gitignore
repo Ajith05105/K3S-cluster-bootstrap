@@ -1,0 +1,57 @@
+# Python virtualenv
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Ansible secrets and vault files
+*.vault
+vault_pass.txt
+vault_password.txt
+.vault_pass
+.vault_password
+*_vault.yml
+
+# Ansible retry files
+*.retry
+
+# Ansible Galaxy roles (installed, not authored)
+roles/requirements/
+galaxy_roles/
+
+# SSH keys
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.pub
+
+# Kubeconfig files (may contain cluster credentials)
+kubeconfig
+kubeconfig-*
+*.kubeconfig
+
+# Sensitive inventory files (real IPs, credentials)
+inventory/hosts.yml
+inventory/group_vars/all.yml
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
