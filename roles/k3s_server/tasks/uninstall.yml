@@ -1,0 +1,30 @@
+---
+- name: Run k3s uninstall script
+  shell: /usr/local/bin/k3s-uninstall.sh
+  ignore_errors: true
+
+- name: Remove k3s binary
+  file:
+    path: "{{ k3s_binary_dest }}"
+    state: absent
+
+- name: Remove k3s install script
+  file:
+    path: "{{ k3s_install_script_dest }}"
+    state: absent
+
+- name: Remove k3s service file
+  file:
+    path: "{{ k3s_server_service_file }}"
+    state: absent
+  notify: Reload systemd
+
+- name: Remove k3s data directory
+  file:
+    path: "{{ k3s_data_dir }}"
+    state: absent
+
+- name: Remove rancher config
+  file:
+    path: /etc/rancher
+    state: absent

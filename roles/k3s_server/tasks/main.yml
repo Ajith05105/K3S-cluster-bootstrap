@@ -1,0 +1,34 @@
+---
+- name: Check if k3s server is already installed
+  stat:
+    path: "{{ k3s_server_service_file }}"
+  register: k3s_service
+
+- name: Install k3s server
+  shell: >
+    INSTALL_K3S_SKIP_DOWNLOAD=true
+    K3S_TOKEN={{ k3s_token }}
+    {{ k3s_install_script_dest }} server --cluster-init
+  when: not k3s_service.stat.exists
+
+- name: Wait for node token to be ready
+  wait_for:
+    path: "{{ k3s_data_dir }}/server/node-token"
+    timeout: 60
+
+- name: Get node token
+  slurp:
+    src: "{{ k3s_data_dir }}/server/node-token"
+  register: node_token
+
+- name: Set node token fact
+  set_fact:
+    k3s_token: "{{ node_token.content | b64decode | trim }}"
+
+- name: Wait for all nodes to be ready
+  command: kubectl get nodes
+  register: nodes_output
+  retries: 10
+  delay: 15
+  until: nodes_output.rc == 0
+  changed_when: false

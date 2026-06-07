@@ -1,0 +1,25 @@
+---
+- name: Get current time from laptop
+  set_fact:
+    current_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+  delegate_to: localhost
+
+- name: Sync time from bootstrap laptop
+  shell: |
+    timedatectl set-ntp false
+    sleep 2
+    timedatectl set-time "{{ current_time }}"
+  become: true
+  ignore_errors: true
+
+- name: Copy k3s binary to node
+  copy:
+    src: "{{ k3s_local_binary }}"
+    dest: "{{ k3s_binary_dest }}"
+    mode: '0755'
+
+- name: Copy k3s install script to node
+  copy:
+    src: "{{ k3s_local_install_script }}"
+    dest: "{{ k3s_install_script_dest }}"
+    mode: '0755'

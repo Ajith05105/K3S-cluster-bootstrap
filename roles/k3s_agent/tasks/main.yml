@@ -1,0 +1,13 @@
+---
+- name: Check if k3s agent is already installed
+  stat:
+    path: "{{ k3s_agent_service_file }}"
+  register: k3s_agent_service
+
+- name: Install k3s agent
+  shell: >
+    INSTALL_K3S_SKIP_DOWNLOAD=true
+    K3S_TOKEN={{ hostvars[groups['server'][0]]['k3s_token'] }}
+    K3S_URL=https://{{ hostvars[groups['server'][0]]['ansible_host'] }}:6443
+    {{ k3s_install_script_dest }} agent
+  when: not k3s_agent_service.stat.exists

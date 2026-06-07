@@ -3,83 +3,16 @@
   hosts: server
   become: true
   tasks:
-    - name: Run k3s uninstall script
-      shell: /usr/local/bin/k3s-uninstall.sh
-      ignore_errors: true
-
-    - name: Remove k3s binary
-      file:
-        path: /usr/local/bin/k3s
-        state: absent
-
-    - name: Remove k3s install script
-      file:
-        path: /home/{{ ansible_user }}/k3s-install.sh
-        state: absent
-
-    - name: Remove k3s service file
-      file:
-        path: /etc/systemd/system/k3s.service
-        state: absent
-
-    - name: Remove k3s data directory
-      file:
-        path: /var/lib/rancher/k3s
-        state: absent
-
-    - name: Remove rancher config
-      file:
-        path: /etc/rancher
-        state: absent
-
-    - name: Reload systemd
-      shell: systemctl daemon-reload
+    - name: Uninstall k3s server
+      include_role:
+        name: k3s_server
+        tasks_from: uninstall
 
 - name: Uninstall k3s from workers
   hosts: workers
   become: true
   tasks:
-    - name: Run k3s agent uninstall script
-      shell: /usr/local/bin/k3s-agent-uninstall.sh
-      ignore_errors: true
-
-    - name: Remove k3s binary
-      file:
-        path: /usr/local/bin/k3s
-        state: absent
-
-    - name: Remove k3s install script
-      file:
-        path: /home/{{ ansible_user }}/k3s-install.sh
-        state: absent
-
-    - name: Remove k3s agent service file
-      file:
-        path: /etc/systemd/system/k3s-agent.service
-        state: absent
-      ignore_errors: true
-
-    - name: Remove immutable flag from load balancer config
-      become: true
-      shell: chattr -i /var/lib/rancher/k3s/agent/etc/k3s-agent-load-balancer.json 2>/dev/null || true
-      ignore_errors: true
-
-    - name: Remove k3s data directory
-      file:
-        path: /var/lib/rancher/k3s
-        state: absent
-
-    - name: Remove rancher config
-      file:
-        path: /etc/rancher
-        state: absent
-
-    - name: Remove k3s agent service env file
-      file:
-        path: /etc/systemd/system/k3s-agent.service.env
-        state: absent
-
-    
-
-    - name: Reload systemd
-      shell: systemctl daemon-reload
+    - name: Uninstall k3s agent
+      include_role:
+        name: k3s_agent
+        tasks_from: uninstall

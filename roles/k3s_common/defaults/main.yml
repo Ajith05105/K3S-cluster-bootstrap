@@ -1,0 +1,5 @@
+---
+k3s_binary_dest: /usr/local/bin/k3s
+k3s_install_script_dest: "/home/{{ ansible_user }}/k3s-install.sh"
+k3s_local_binary: /tmp/k3s
+k3s_local_install_script: /tmp/k3s-install.sh
