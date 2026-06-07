@@ -1,43 +1,118 @@
 ---
-- name: Preflight checks
-  hosts: all
-  become: true
-  tasks:
-    - name: Check if k3s binary exists
-      stat:
-        path: /usr/local/bin/k3s
-      register: k3s_binary
+# =============================================================================
+# Preflight Playbook
+# =============================================================================
+# Runs on the BOOTSTRAP MACHINE ONLY (localhost) — not on any Pi node.
+# Requires internet access on the bootstrap machine.
+#
+# What it does:
+#   - Downloads K3s binary, install script, and air-gap image bundle
+#   - Pulls all required container images as ARM64 via Podman
+#   - Saves all images as tar files
+#   - Verifies everything is present and correct architecture before proceeding
+#
+# Prerequisites:
+#   - Podman installed and machine running (podman machine start)
+#   - Internet access on this machine
+#
+# Output:
+#   - All artifacts staged at staging_dir (defined in group_vars/all.yml)
+#
+# Run with:
+#   ansible-playbook playbooks/preflight.yml
+#
+# Next step:
+#   ansible-playbook playbooks/bootstrap.yml
+# =============================================================================
 
-    - name: Check k3s version
-      command: k3s --version
-      register: k3s_version
-      when: k3s_binary.stat.exists
+- name: Preflight — Download and stage all artifacts on bootstrap machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    - name: Verify Podman is installed
+      command: podman --version
+      register: podman_check
+      failed_when: podman_check.rc != 0
       changed_when: false
 
-    - name: Print k3s status
+    - name: Create staging directory
+      file:
+        path: "{{ staging_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download K3s binary (ARM64)
+      get_url:
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-arm64"
+        dest: "{{ staging_dir }}/k3s"
+        mode: '0755'
+        timeout: 120
+
+    - name: Download K3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: "{{ staging_dir }}/k3s-install.sh"
+        mode: '0755'
+        timeout: 60
+
+    - name: Download K3s air-gap image bundle — may take several minutes
+      get_url:
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-airgap-images-arm64.tar.zst"
+        dest: "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
+        timeout: 600
+
+    - name: Pull container images as ARM64
+      command: podman pull --platform linux/arm64 {{ item.image }}
+      loop: "{{ container_images }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Verify each image is ARM64
+      command: podman inspect {{ item.image }} --format '{{ "{{" }}.Architecture{{ "}}" }}'
+      loop: "{{ container_images }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: arch_checks
+      changed_when: false
+
+    - name: Fail if any image is not arm64
+      fail:
+        msg: "{{ item.item.name }} pulled as {{ item.stdout }} not arm64 — check Podman platform support"
+      loop: "{{ arch_checks.results }}"
+      when: item.stdout != "arm64"
+
+    - name: Save images as tar files
+      command: podman save {{ item.image }} -o {{ staging_dir }}/{{ item.name }}-arm64.tar
+      loop: "{{ container_images }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Verify all artifacts present and non-empty
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ staging_dir }}/k3s"
+        - "{{ staging_dir }}/k3s-install.sh"
+        - "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
+        - "{{ staging_dir }}/registry-arm64.tar"
+        - "{{ staging_dir }}/gitea-arm64.tar"
+        - "{{ staging_dir }}/argocd-arm64.tar"
+        - "{{ staging_dir }}/redis-arm64.tar"
+        - "{{ staging_dir }}/dex-arm64.tar"
+        - "{{ staging_dir }}/nginx-arm64.tar"
+      register: artifact_checks
+
+    - name: Fail if any artifact missing or empty
+      fail:
+        msg: "Missing or empty: {{ item.item }}"
+      loop: "{{ artifact_checks.results }}"
+      when: not item.stat.exists or item.stat.size == 0
+
+    - name: Preflight complete
       debug:
-        msg: "{{ inventory_hostname }}: k3s {{ 'installed - ' + k3s_version.stdout if k3s_binary.stat.exists else 'NOT installed' }}"
-
-    - name: Check k3s server service
-      systemd:
-        name: k3s
-      register: k3s_server
-      when: inventory_hostname in groups['server']
-      ignore_errors: true
-
-    - name: Check k3s agent service
-      systemd:
-        name: k3s-agent
-      register: k3s_agent
-      when: inventory_hostname in groups['workers']
-      ignore_errors: true
-
-    - name: Print k3s server service status
-      debug:
-        msg: "{{ inventory_hostname }}: k3s server is {{ k3s_server.status.ActiveState }}"
-      when: inventory_hostname in groups['server']
-
-    - name: Print k3s agent service status
-      debug:
-        msg: "{{ inventory_hostname }}: k3s agent is {{ k3s_agent.status.ActiveState }}"
-      when: inventory_hostname in groups['workers']
+        msg: |
+          All artifacts staged at {{ staging_dir }}
+          Ready to run: ansible-playbook playbooks/bootstrap.yml
