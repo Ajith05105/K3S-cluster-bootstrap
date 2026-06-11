@@ -33,6 +33,37 @@
   roles:
     - k3s_agent
 
+- name: Import ArgoCD images on worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Copy ArgoCD image tar to worker
+      copy:
+        src: "{{ staging_dir }}/argocd-arm64.tar"
+        dest: "/home/{{ ansible_user }}/argocd-arm64.tar"
+        mode: '0644'
+
+    - name: Copy Redis image tar to worker
+      copy:
+        src: "{{ staging_dir }}/redis-arm64.tar"
+        dest: "/home/{{ ansible_user }}/redis-arm64.tar"
+        mode: '0644'
+
+    - name: Copy Dex image tar to worker
+      copy:
+        src: "{{ staging_dir }}/dex-arm64.tar"
+        dest: "/home/{{ ansible_user }}/dex-arm64.tar"
+        mode: '0644'
+
+    - name: Import ArgoCD image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/argocd-arm64.tar
+
+    - name: Import Redis image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/redis-arm64.tar
+
+    - name: Import Dex image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/dex-arm64.tar
+
 - name: Deploy LDR on server
   hosts: server
   become: true
@@ -50,3 +81,4 @@
   become: true
   roles:
     - argocd
+
