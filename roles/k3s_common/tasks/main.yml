@@ -23,3 +23,30 @@
     src: "{{ k3s_local_install_script }}"
     dest: "{{ k3s_install_script_dest }}"
     mode: '0755'
+
+- name: Copy K3s air-gap image bundle to node
+  copy:
+    src: "{{ k3s_local_airgap_bundle }}"
+    dest: "{{ k3s_airgap_bundle_dest }}"
+    mode: '0644'
+
+- name: Import K3s air-gap images into containerd
+  command: k3s ctr images import {{ k3s_airgap_bundle_dest }}
+  register: airgap_import
+  changed_when: "'saved' in airgap_import.stdout"
+
+- name: Create K3s config directory
+  file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: '0755'
+
+- name: Configure registries.yaml for local LDR
+  copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    content: |
+      mirrors:
+        "{{ ldr_host }}:{{ ldr_port }}":
+          endpoint:
+            - "http://{{ ldr_host }}:{{ ldr_port }}"
+    mode: '0644'

@@ -1,0 +1,28 @@
+---
+- name: Copy LDR image tar to server
+  copy:
+    src: "{{ ldr_image_tar }}"
+    dest: "/home/{{ ansible_user }}/registry-arm64.tar"
+    mode: '0644'
+
+- name: Import LDR image into containerd
+  command: k3s ctr images import /home/{{ ansible_user }}/registry-arm64.tar
+  register: ldr_import
+  changed_when: "'saved' in ldr_import.stdout"
+
+- name: Copy registry.yaml manifest to server
+  copy:
+    src: registry.yaml
+    dest: "/home/{{ ansible_user }}/registry.yaml"
+    mode: '0644'
+
+- name: Deploy LDR
+  command: kubectl apply -f /home/{{ ansible_user }}/registry.yaml
+
+- name: Wait for registry pod to be running
+  command: kubectl get deployment registry -o jsonpath='{.status.readyReplicas}'
+  register: registry_ready
+  retries: 15
+  delay: 10
+  until: registry_ready.stdout == "1"
+  changed_when: false

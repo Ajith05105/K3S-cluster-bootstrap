@@ -1,0 +1,4 @@
+---
+ldr_image_tar: "{{ staging_dir }}/registry-arm64.tar"
+ldr_image: docker.io/library/registry:2
+ldr_port: 5000

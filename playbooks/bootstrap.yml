@@ -32,3 +32,21 @@
   become: true
   roles:
     - k3s_agent
+
+- name: Deploy LDR on server
+  hosts: server
+  become: true
+  roles:
+    - ldr
+
+- name: Deploy Gitea on server
+  hosts: server
+  become: true
+  roles:
+    - gitea
+
+- name: Deploy ArgoCD on server
+  hosts: server
+  become: true
+  roles:
+    - argocd

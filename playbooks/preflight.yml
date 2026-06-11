@@ -66,6 +66,13 @@
         dest: "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
         timeout: 600
 
+    - name: Download ArgoCD install manifest
+      get_url:
+        url: "https://raw.githubusercontent.com/argoproj/argo-cd/v3.4.3/manifests/install.yaml"
+        dest: "{{ staging_dir }}/argocd-install.yaml"
+        timeout: 60
+        mode: '0644'
+
     - name: Pull container images as ARM64
       command: podman pull --platform linux/arm64 {{ item.image }}
       loop: "{{ container_images }}"
@@ -87,7 +94,7 @@
       when: item.stdout != "arm64"
 
     - name: Save images as tar files
-      command: podman save {{ item.image }} -o {{ staging_dir }}/{{ item.name }}-arm64.tar
+      command: podman save --format oci-archive {{ item.image }} -o {{ staging_dir }}/{{ item.name }}-arm64.tar
       loop: "{{ container_images }}"
       loop_control:
         label: "{{ item.name }}"
@@ -105,6 +112,7 @@
         - "{{ staging_dir }}/redis-arm64.tar"
         - "{{ staging_dir }}/dex-arm64.tar"
         - "{{ staging_dir }}/nginx-arm64.tar"
+        - "{{ staging_dir }}/argocd-install.yaml"
       register: artifact_checks
 
     - name: Fail if any artifact missing or empty

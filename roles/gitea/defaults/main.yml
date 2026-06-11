@@ -1,0 +1,5 @@
+---
+gitea_image_tar: "{{ staging_dir }}/gitea-arm64.tar"
+gitea_image: docker.io/gitea/gitea:latest
+gitea_data_dir: /opt/gitea-data
+gitea_port: 3000

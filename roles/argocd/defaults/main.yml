@@ -1,0 +1,7 @@
+---
+argocd_image_tar: "{{ staging_dir }}/argocd-arm64.tar"
+redis_image_tar: "{{ staging_dir }}/redis-arm64.tar"
+dex_image_tar: "{{ staging_dir }}/dex-arm64.tar"
+argocd_version: "v3.4.3"
+argocd_namespace: argocd
+coredns_image: rancher/mirrored-coredns-coredns:1.14.2
