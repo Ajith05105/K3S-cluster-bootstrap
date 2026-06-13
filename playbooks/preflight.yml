@@ -35,9 +35,9 @@
     - name: Print k3s server service status
       debug:
         msg: "{{ inventory_hostname }}: k3s server is {{ k3s_server.status.ActiveState }}"
-      when: inventory_hostname in groups['server']
+      when: inventory_hostname in groups['server'] and k3s_server.status is defined
 
     - name: Print k3s agent service status
       debug:
         msg: "{{ inventory_hostname }}: k3s agent is {{ k3s_agent.status.ActiveState }}"
-      when: inventory_hostname in groups['workers']
+      when: inventory_hostname in groups['workers'] and k3s_agent.status is defined

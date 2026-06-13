@@ -1,0 +1,4 @@
+---
+dnsmasq_bin: /usr/sbin/dnsmasq
+dnsmasq_conf_path: /etc/dnsmasq.conf
+dnsmasq_stop_cmd: systemctl stop dnsmasq
