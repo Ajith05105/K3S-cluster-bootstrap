@@ -23,3 +23,14 @@
     src: "{{ k3s_local_install_script }}"
     dest: "{{ k3s_install_script_dest }}"
     mode: '0755'
+
+- name: Ensure k3s images directory exists
+  file:
+    path: "{{ k3s_airgap_images_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy k3s air-gap images
+  copy:
+    src: "{{ k3s_local_airgap_images }}"
+    dest: "{{ k3s_airgap_images_dir }}/k3s-airgap-images-arm64.tar.zst"

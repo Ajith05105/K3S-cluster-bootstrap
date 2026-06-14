@@ -1,0 +1,36 @@
+---
+- name: Register node reservation in dnsmasq
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Add dhcp-host reservation to dnsmasq ConfigMap
+      shell: |
+        CURRENT=$(kubectl get configmap dnsmasq-config -n kube-system -o jsonpath='{.data.dnsmasq\.conf}')
+        NEW_CONF="${CURRENT}
+        dhcp-host={{ node_mac }},{{ node_ip }},{{ inventory_hostname }}"
+        kubectl patch configmap dnsmasq-config \
+          --namespace=kube-system \
+          --type=merge \
+          -p "{\"data\":{\"dnsmasq.conf\":\"$NEW_CONF\"}}"
+      delegate_to: localhost
+
+- name: Prepare new node
+  hosts: all
+  become: true
+  roles:
+    - k3s_prereqs
+    - k3s_common
+
+- name: Install k3s server on new control plane node
+  hosts: all
+  become: true
+  roles:
+    - k3s_server
+  when: node_role == 'server'
+
+- name: Install k3s agent on new worker node
+  hosts: all
+  become: true
+  roles:
+    - k3s_agent
+  when: node_role == 'agent'

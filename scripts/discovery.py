@@ -76,7 +76,8 @@ def generate_inventory(nodes, ssh_user):
         role = determine_role(node["hostname"])
         inventory["all"]["children"][role]["hosts"][node["hostname"]] = {
             "ansible_host": node["ip"],
-            "ansible_user": ssh_user
+            "ansible_user": ssh_user,
+            "mac_address": node["mac"]
         }
         print(f"  {node['hostname']} ({node['ip']}) → {role}")
 
