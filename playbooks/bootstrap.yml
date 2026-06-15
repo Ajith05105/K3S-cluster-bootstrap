@@ -15,6 +15,11 @@
         dest: /tmp/k3s-install.sh
         mode: '0755'
 
+    - name: Download k3s air-gap images
+      get_url:
+        url: https://github.com/k3s-io/k3s/releases/latest/download/k3s-airgap-images-arm64.tar.zst
+        dest: /tmp/k3s-airgap-images-arm64.tar.zst
+
 - name: Prepare all nodes
   hosts: all
   become: true
@@ -24,6 +29,10 @@
 - name: Install k3s server
   hosts: server
   become: true
+  serial: 1
+  vars:
+    k3s_cluster_init: "{{ inventory_hostname == groups['server'][0] }}"
+    k3s_server_url: "{{ hostvars[groups['server'][0]]['ansible_host'] }}"
   roles:
     - k3s_server
 
@@ -32,3 +41,127 @@
   become: true
   roles:
     - k3s_agent
+
+- name: Import ArgoCD images on worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Copy ArgoCD image tar to worker
+      copy:
+        src: "{{ staging_dir }}/argocd-arm64.tar"
+        dest: "/home/{{ ansible_user }}/argocd-arm64.tar"
+        mode: '0644'
+
+    - name: Copy Redis image tar to worker
+      copy:
+        src: "{{ staging_dir }}/redis-arm64.tar"
+        dest: "/home/{{ ansible_user }}/redis-arm64.tar"
+        mode: '0644'
+
+    - name: Copy Dex image tar to worker
+      copy:
+        src: "{{ staging_dir }}/dex-arm64.tar"
+        dest: "/home/{{ ansible_user }}/dex-arm64.tar"
+        mode: '0644'
+
+    - name: Import ArgoCD image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/argocd-arm64.tar
+
+    - name: Import Redis image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/redis-arm64.tar
+
+    - name: Import Dex image on worker
+      command: k3s ctr images import /home/{{ ansible_user }}/dex-arm64.tar
+
+- name: Deploy LDR on server
+  hosts: server
+  become: true
+  roles:
+    - ldr
+
+- name: Deploy Gitea on server
+  hosts: server
+  become: true
+  roles:
+    - gitea
+
+- name: Deploy ArgoCD on server
+  hosts: server
+  become: true
+  roles:
+    - argocd
+
+- name: Deploy cluster manifests to first control plane
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  tasks:
+    - name: Ensure k3s manifests directory exists
+      file:
+        path: /var/lib/rancher/k3s/server/manifests
+        state: directory
+        mode: '0700'
+
+    - name: Deploy dnsmasq manifest
+      template:
+        src: "{{ playbook_dir }}/../manifests/dnsmasq-dhcp.yml.j2"
+        dest: /var/lib/rancher/k3s/server/manifests/dnsmasq-dhcp.yml
+        mode: '0600'
+
+    - name: Deploy RBAC manifest
+      copy:
+        src: "{{ playbook_dir }}/../manifests/ansible-runner-rbac.yml"
+        dest: /var/lib/rancher/k3s/server/manifests/ansible-runner-rbac.yml
+        mode: '0600'
+
+- name: Build and save container images on laptop
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Pull dnsmasq image
+      command: podman pull --platform linux/arm64 dockurr/dnsmasq:latest
+
+    - name: Build ansible-runner image
+      command: podman build --platform linux/arm64 -t ansible-runner:latest -f docker/ansible-runner/Dockerfile .
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+    - name: Save dnsmasq image to tarball
+      command: podman save -o /tmp/dnsmasq.tar dockurr/dnsmasq:latest
+
+    - name: Save ansible-runner image to tarball
+      command: podman save -o /tmp/ansible-runner.tar ansible-runner:latest
+
+- name: Import dnsmasq image on server nodes
+  hosts: server
+  become: true
+  tasks:
+    - name: Copy dnsmasq image
+      copy:
+        src: /tmp/dnsmasq.tar
+        dest: /tmp/dnsmasq.tar
+
+    - name: Import dnsmasq image into containerd
+      shell: k3s ctr images ls | grep -q "dnsmasq" || k3s ctr images import /tmp/dnsmasq.tar
+
+    - name: Clean up dnsmasq tarball
+      file:
+        path: /tmp/dnsmasq.tar
+        state: absent
+
+- name: Import ansible-runner image on all nodes
+  hosts: all
+  become: true
+  tasks:
+    - name: Copy ansible-runner image
+      copy:
+        src: /tmp/ansible-runner.tar
+        dest: /tmp/ansible-runner.tar
+
+    - name: Import ansible-runner image into containerd
+      shell: k3s ctr images ls | grep -q "ansible-runner" || k3s ctr images import /tmp/ansible-runner.tar
+
+    - name: Clean up ansible-runner tarball
+      file:
+        path: /tmp/ansible-runner.tar
+        state: absent
+        

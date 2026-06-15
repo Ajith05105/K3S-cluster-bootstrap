@@ -1,0 +1,34 @@
+---
+- name: Create Gitea data directory on server
+  file:
+    path: "{{ gitea_data_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy Gitea image tar to server
+  copy:
+    src: "{{ gitea_image_tar }}"
+    dest: "/home/{{ ansible_user }}/gitea-arm64.tar"
+    mode: '0644'
+
+- name: Import Gitea image into containerd
+  command: k3s ctr images import /home/{{ ansible_user }}/gitea-arm64.tar
+  register: gitea_import
+  changed_when: "'saved' in gitea_import.stdout"
+
+- name: Copy gitea.yaml manifest to server
+  copy:
+    src: gitea.yaml
+    dest: "/home/{{ ansible_user }}/gitea.yaml"
+    mode: '0644'
+
+- name: Deploy Gitea
+  command: kubectl apply -f /home/{{ ansible_user }}/gitea.yaml
+
+- name: Wait for Gitea pod to be running
+  command: kubectl get deployment gitea -o jsonpath='{.status.readyReplicas}'
+  register: gitea_ready
+  retries: 15
+  delay: 10
+  until: gitea_ready.stdout == "1"
+  changed_when: false

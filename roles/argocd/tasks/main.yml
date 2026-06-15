@@ -1,0 +1,89 @@
+---
+- name: Copy ArgoCD image tar to server
+  copy:
+    src: "{{ argocd_image_tar }}"
+    dest: "/home/{{ ansible_user }}/argocd-arm64.tar"
+    mode: '0644'
+
+- name: Copy Redis image tar to server
+  copy:
+    src: "{{ redis_image_tar }}"
+    dest: "/home/{{ ansible_user }}/redis-arm64.tar"
+    mode: '0644'
+
+- name: Copy Dex image tar to server
+  copy:
+    src: "{{ dex_image_tar }}"
+    dest: "/home/{{ ansible_user }}/dex-arm64.tar"
+    mode: '0644'
+
+- name: Import ArgoCD image into containerd
+  command: k3s ctr images import /home/{{ ansible_user }}/argocd-arm64.tar
+  register: argocd_import
+  changed_when: "'saved' in argocd_import.stdout"
+
+- name: Import Redis image into containerd
+  command: k3s ctr images import /home/{{ ansible_user }}/redis-arm64.tar
+  register: redis_import
+  changed_when: "'saved' in redis_import.stdout"
+
+- name: Import Dex image into containerd
+  command: k3s ctr images import /home/{{ ansible_user }}/dex-arm64.tar
+  register: dex_import
+  changed_when: "'saved' in dex_import.stdout"
+
+- name: Copy ArgoCD install manifest to server
+  copy:
+    src: "{{ staging_dir }}/argocd-install.yaml"
+    dest: "/home/{{ ansible_user }}/argocd-install.yaml"
+    mode: '0644'
+
+- name: Create ArgoCD namespace
+  command: kubectl create namespace {{ argocd_namespace }}
+  register: ns_result
+  failed_when: ns_result.rc != 0 and 'already exists' not in ns_result.stderr
+  changed_when: ns_result.rc == 0
+
+- name: Apply ArgoCD install manifest
+  command: kubectl apply --server-side --force-conflicts -n {{ argocd_namespace }} -f /home/{{ ansible_user }}/argocd-install.yaml
+
+- name: Fix CoreDNS image version
+  command: >
+    kubectl patch deployment coredns -n kube-system --type=json
+    -p='[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"{{ coredns_image }}"}]'
+
+- name: Set CoreDNS imagePullPolicy to Never
+  command: >
+    kubectl patch deployment coredns -n kube-system --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
+
+- name: Restart CoreDNS pods
+  command: kubectl delete pod -n kube-system -l k8s-app=kube-dns
+
+- name: Patch ArgoCD deployments imagePullPolicy to Never
+  command: >
+    kubectl patch {{ item.kind }} {{ item.name }} -n {{ argocd_namespace }} --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
+  loop:
+    - { name: argocd-server,                      kind: deployment  }
+    - { name: argocd-applicationset-controller,   kind: deployment  }
+    - { name: argocd-notifications-controller,    kind: deployment  }
+    - { name: argocd-repo-server,                 kind: deployment  }
+    - { name: argocd-dex-server,                  kind: deployment  }
+    - { name: argocd-redis,                       kind: deployment  }
+    - { name: argocd-application-controller,      kind: statefulset }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Patch ArgoCD dex-server init container imagePullPolicy
+  command: >
+    kubectl patch deployment argocd-dex-server -n {{ argocd_namespace }} --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/initContainers/0/imagePullPolicy","value":"Never"}]'
+
+- name: Wait for ArgoCD pods to be running
+  command: kubectl get pods -n {{ argocd_namespace }} --field-selector=status.phase=Running
+  register: argocd_pods
+  retries: 30
+  delay: 15
+  until: argocd_pods.stdout_lines | length >= 7
+  changed_when: false

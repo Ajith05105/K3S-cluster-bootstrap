@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      nodeName: pi-1-server
+      containers:
+      - name: gitea
+        image: docker.io/gitea/gitea:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 3000
+        - containerPort: 22
+        env:
+        - name: GITEA__database__DB_TYPE
+          value: sqlite3
+        - name: GITEA__database__PATH
+          value: /data/gitea/gitea.db
+        volumeMounts:
+        - name: gitea-data
+          mountPath: /data
+      volumes:
+      - name: gitea-data
+        hostPath:
+          path: /opt/gitea-data
+          type: DirectoryOrCreate
+      hostNetwork: true

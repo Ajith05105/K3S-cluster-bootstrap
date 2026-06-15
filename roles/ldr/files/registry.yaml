@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      nodeName: pi-1-server
+      containers:
+      - name: registry
+        image: docker.io/library/registry:2
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 5000
+      hostNetwork: true

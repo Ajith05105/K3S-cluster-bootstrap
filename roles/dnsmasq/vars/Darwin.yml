@@ -1,0 +1,4 @@
+---
+dnsmasq_bin: /opt/homebrew/sbin/dnsmasq
+dnsmasq_conf_path: /usr/local/etc/dnsmasq.conf
+dnsmasq_stop_cmd: brew services stop dnsmasq

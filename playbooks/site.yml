@@ -1,3 +1,4 @@
 ---
-- import_playbook: preflight.yml
+- import_playbook: prepare.yml
 - import_playbook: bootstrap.yml
+- import_playbook: preflight.yml
