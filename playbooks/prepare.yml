@@ -1,0 +1,31 @@
+---
+- name: Setup network on laptop
+  hosts: localhost
+  gather_facts: true
+  vars_prompt:
+    - name: mac_sudo_password
+      prompt: "Enter Mac sudo password (for dnsmasq)"
+      private: true
+  vars:
+    ansible_become_pass: "{{ mac_sudo_password }}"
+  tasks:
+    - name: Configure and start dnsmasq
+      include_role:
+        name: dnsmasq
+
+    - name: Wait for Pis to boot
+      pause:
+        prompt: "Boot your Pis and type Enter when ready..."
+
+    - name: Run node discovery
+      command: python3 scripts/discovery.py
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+    - meta: refresh_inventory
+
+- name: Prepare Pi nodes for k3s
+  hosts: all
+  become: true
+  roles:
+    - k3s_prereqs

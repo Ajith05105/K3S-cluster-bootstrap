@@ -1,0 +1,3 @@
+---
+cmdline_path: /boot/firmware/cmdline.txt
+cloud_cfg_path: /etc/cloud/cloud.cfg

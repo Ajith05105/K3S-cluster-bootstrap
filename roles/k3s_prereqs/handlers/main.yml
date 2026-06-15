@@ -1,0 +1,5 @@
+---
+- name: Reboot node
+  reboot:
+    reboot_timeout: 300
+    post_reboot_delay: 30

@@ -1,0 +1,16 @@
+# Copy this file to all.yml and fill in your values
+# DO NOT commit all.yml to git — it is gitignored
+
+# SSH authentication (key-based, no passwords)
+ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+ansible_user: pi
+
+# Cluster secret — used to join agents to the server
+k3s_token: changeme
+
+# Network — laptop interface connected to the Pi switch
+bootstrap_interface: en8
+bootstrap_interface_ip: 192.168.1.100
+dhcp_range_start: 192.168.1.200
+dhcp_range_end: 192.168.1.254
+subnet_mask: 255.255.255.0

@@ -7,6 +7,7 @@
 #
 # What it does:
 #   - Downloads K3s binary, install script, and air-gap image bundle
+#   - Downloads ArgoCD install manifest
 #   - Pulls all required container images as ARM64 via Podman
 #   - Saves all images as tar files
 #   - Verifies everything is present and correct architecture before proceeding
@@ -126,3 +127,4 @@
         msg: |
           All artifacts staged at {{ staging_dir }}
           Ready to run: ansible-playbook playbooks/bootstrap.yml
+          
