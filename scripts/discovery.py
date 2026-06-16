@@ -1,46 +1,72 @@
 #!/usr/bin/env python3
 
-import yaml
-import sys
 import os
-import paramiko
-from pathlib import Path
+import re
+import subprocess
+import sys
 
-LEASE_FILE = "/tmp/dnsmasq.leases"
-INVENTORY_FILE = "inventories/production/hosts.yml"
+import paramiko
+import yaml
+
 GROUP_VARS_FILE = "inventories/production/group_vars/all.yml"
+
+SCAN_RANGE_START = 200
+SCAN_RANGE_END = 254
+
 SSH_TIMEOUT = 10
+
+INVENTORY_FILE = "inventories/production/hosts.yml"
 
 SERVER_KEYWORDS = ["server", "master", "control"]
 WORKER_KEYWORDS = ["worker", "agent", "node"]
 
 
-def load_group_vars(path):
-    with open(path, 'r') as f:
+def load_group_vars():
+    with open(GROUP_VARS_FILE, "r") as f:
         return yaml.safe_load(f)
 
 
-def read_leases(lease_file):
-    leases = []
-    try:
-        with open(lease_file, 'r') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 3:
-                    leases.append({
-                        "ip": parts[2],
-                        "mac": parts[1],
-                        "hostname": parts[3] if len(parts) > 3 else "unknown"
-                    })
-    except FileNotFoundError:
-        print(f"Lease file not found: {lease_file}")
-        sys.exit(1)
-    return leases
+def network_prefix(group_vars):
+    return group_vars["bootstrap_interface_ip"].rsplit(".", 1)[0]
 
 
-def get_hostname(ip, key_path, ssh_user):
+def scan_subnet(prefix):
+    target = f"{prefix}.{SCAN_RANGE_START}-{SCAN_RANGE_END}"
+    result = subprocess.run(
+        ["nmap", "-sn", target],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    devices = []
+    current_ip = None
+    for line in result.stdout.splitlines():
+        ip_match = re.match(r"Nmap scan report for (?:\S+ )?\(?([\d.]+)\)?", line)
+        if ip_match:
+            current_ip = ip_match.group(1)
+            continue
+        mac_match = re.match(r"MAC Address: ([0-9A-Fa-f:]+)", line)
+        if mac_match and current_ip:
+            devices.append({"ip": current_ip, "mac": mac_match.group(1).lower()})
+            current_ip = None
+
+    return devices
+
+
+def known_macs(inventory):
+    macs = set()
+    for group in inventory.get("all", {}).get("children", {}).values():
+        for host in group.get("hosts", {}).values():
+            mac = host.get("mac_address")
+            if mac:
+                macs.add(mac.lower())
+    return macs
+
+
+def get_hostname(ip, ssh_key_path, ssh_user):
     try:
-        key = paramiko.Ed25519Key.from_private_key_file(os.path.expanduser(key_path))
+        key = paramiko.Ed25519Key.from_private_key_file(os.path.expanduser(ssh_key_path))
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(ip, username=ssh_user, pkey=key, timeout=SSH_TIMEOUT)
@@ -61,13 +87,15 @@ def determine_role(hostname):
     return "workers"
 
 
-def generate_inventory(nodes, ssh_user):
+def load_inventory():
     try:
-        with open(INVENTORY_FILE, 'r') as f:
-            inventory = yaml.safe_load(f) or {}
+        with open(INVENTORY_FILE, "r") as f:
+            return yaml.safe_load(f) or {}
     except FileNotFoundError:
-        inventory = {}
+        return {}
 
+
+def merge_inventory(inventory, nodes, ssh_user):
     inventory.setdefault("all", {}).setdefault("children", {})
     inventory["all"]["children"].setdefault("server", {"hosts": {}})
     inventory["all"]["children"].setdefault("workers", {"hosts": {}})
@@ -77,47 +105,53 @@ def generate_inventory(nodes, ssh_user):
         inventory["all"]["children"][role]["hosts"][node["hostname"]] = {
             "ansible_host": node["ip"],
             "ansible_user": ssh_user,
-            "mac_address": node["mac"]
+            "mac_address": node["mac"],
         }
-        print(f"  {node['hostname']} ({node['ip']}) → {role}")
+        print(f"  {node['hostname']} ({node['ip']}) -> {role}")
 
     return inventory
 
 
 def main():
-    group_vars = load_group_vars(GROUP_VARS_FILE)
-    key_path = group_vars.get("ansible_ssh_private_key_file")
-    if not key_path:
-        print("ansible_ssh_private_key_file not set in group_vars/all.yml")
-        sys.exit(1)
-    ssh_user = os.environ.get("BOOTSTRAP_USER", "pi")
+    group_vars = load_group_vars()
+    prefix = network_prefix(group_vars)
+    ssh_key_path = group_vars["ansible_ssh_private_key_file"]
+    ssh_user = group_vars["ansible_user"]
 
-    print("Reading DHCP leases...")
-    leases = read_leases(LEASE_FILE)
+    print(f"Scanning {prefix}.{SCAN_RANGE_START}-{SCAN_RANGE_END}...")
+    devices = scan_subnet(prefix)
 
-    if not leases:
-        print("No leases found. Are the nodes powered on?")
-        sys.exit(1)
+    if not devices:
+        print("No devices found on the subnet.")
+        return
 
-    print(f"Found {len(leases)} lease(s). Discovering hostnames...")
+    inventory = load_inventory()
+    existing_macs = known_macs(inventory)
+
+    new_devices = [d for d in devices if d["mac"] not in existing_macs]
+    if not new_devices:
+        print("No new nodes found — inventory already up to date.")
+        return
+
+    print(f"Found {len(new_devices)} new device(s). Identifying...")
     nodes = []
-    for lease in leases:
-        hostname = get_hostname(lease["ip"], key_path, ssh_user)
+    for device in new_devices:
+        hostname = get_hostname(device["ip"], ssh_key_path, ssh_user)
         if hostname:
-            nodes.append({"hostname": hostname, "ip": lease["ip"], "mac": lease["mac"]})
+            nodes.append({"hostname": hostname, "ip": device["ip"], "mac": device["mac"]})
 
     if not nodes:
-        print("No nodes reachable.")
-        sys.exit(1)
+        print("New devices found but none were reachable over SSH yet.")
+        return
 
-    print(f"\nDiscovered nodes:")
-    inventory = generate_inventory(nodes, ssh_user)
+    print("New nodes:")
+    inventory = merge_inventory(inventory, nodes, ssh_user)
 
     os.makedirs(os.path.dirname(INVENTORY_FILE), exist_ok=True)
-    with open(INVENTORY_FILE, 'w') as f:
+    with open(INVENTORY_FILE, "w") as f:
         yaml.dump(inventory, f, default_flow_style=False)
 
-    print(f"\nInventory written to {INVENTORY_FILE}")
+    print(f"Inventory updated: {INVENTORY_FILE}")
 
 
 if __name__ == "__main__":

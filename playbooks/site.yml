@@ -1,4 +1,4 @@
 ---
-- import_playbook: prepare.yml
-- import_playbook: bootstrap.yml
+- import_playbook: discovery.yml
+- import_playbook: join_node.yml
 - import_playbook: preflight.yml

@@ -8,7 +8,8 @@ Automated bare-metal k3s cluster deployment on Raspberry Pi 5 using Ansible. Run
 Laptop (dnsmasq + discovery) → node prep → k3s install → preflight verification
 ```
 
-1. **prepare** — laptop runs dnsmasq as a temporary DHCP server, waits for Pis to boot, SSHes in to discover hostnames, writes the Ansible inventory, then prepares each node (cgroups, cloud-init)
+0. **(manual, before running anything)** — start dnsmasq on the laptop as a temporary DHCP server: `python3 scripts/dnsmasq_setup.py start`
+1. **prepare** — waits for Pis to boot, SSHes in to discover hostnames, writes the Ansible inventory, then prepares each node (cgroups, cloud-init)
 2. **bootstrap** — copies the k3s binary and install script to each node, installs k3s server on the control plane, installs k3s agents on workers
 3. **preflight** — verifies k3s is installed and services are active on all nodes
 
