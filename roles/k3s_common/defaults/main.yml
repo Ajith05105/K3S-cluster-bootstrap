@@ -1,16 +1,9 @@
 ---
 k3s_binary_dest: /usr/local/bin/k3s
 k3s_install_script_dest: "/home/{{ ansible_user }}/k3s-install.sh"
-<<<<<<< HEAD
 k3s_local_binary: "{{ staging_dir }}/k3s"
 k3s_local_install_script: "{{ staging_dir }}/k3s-install.sh"
 k3s_local_airgap_bundle: "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
-k3s_airgap_bundle_dest: "/home/{{ ansible_user }}/k3s-airgap-images-arm64.tar.zst"
+k3s_airgap_images_dir: /var/lib/rancher/k3s/agent/images
 ldr_host: 192.168.1.200
 ldr_port: 5000
-=======
-k3s_local_binary: /tmp/k3s
-k3s_local_install_script: /tmp/k3s-install.sh
-k3s_local_airgap_images: /tmp/k3s-airgap-images-arm64.tar.zst
-k3s_airgap_images_dir: /var/lib/rancher/k3s/agent/images
->>>>>>> origin/feat/DHCP
