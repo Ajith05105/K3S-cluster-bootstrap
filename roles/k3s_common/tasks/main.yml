@@ -24,17 +24,17 @@
     dest: "{{ k3s_install_script_dest }}"
     mode: '0755'
 
-<<<<<<< HEAD
-- name: Copy K3s air-gap image bundle to node
+- name: Ensure k3s images directory exists
+  file:
+    path: "{{ k3s_airgap_images_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy k3s air-gap images to images directory
   copy:
     src: "{{ k3s_local_airgap_bundle }}"
-    dest: "{{ k3s_airgap_bundle_dest }}"
+    dest: "{{ k3s_airgap_images_dir }}/k3s-airgap-images-arm64.tar.zst"
     mode: '0644'
-
-- name: Import K3s air-gap images into containerd
-  command: k3s ctr images import {{ k3s_airgap_bundle_dest }}
-  register: airgap_import
-  changed_when: "'saved' in airgap_import.stdout"
 
 - name: Create K3s config directory
   file:
@@ -51,15 +51,3 @@
           endpoint:
             - "http://{{ ldr_host }}:{{ ldr_port }}"
     mode: '0644'
-=======
-- name: Ensure k3s images directory exists
-  file:
-    path: "{{ k3s_airgap_images_dir }}"
-    state: directory
-    mode: '0755'
-
-- name: Copy k3s air-gap images
-  copy:
-    src: "{{ k3s_local_airgap_images }}"
-    dest: "{{ k3s_airgap_images_dir }}/k3s-airgap-images-arm64.tar.zst"
->>>>>>> origin/feat/DHCP
