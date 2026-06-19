@@ -90,7 +90,7 @@ def main():
     if not key_path:
         print("ansible_ssh_private_key_file not set in group_vars/all.yml")
         sys.exit(1)
-    ssh_user = os.environ.get("BOOTSTRAP_USER", "pi")
+    ssh_user = group_vars.get("ansible_user", "pi")
 
     print("Reading DHCP leases...")
     leases = read_leases(LEASE_FILE)
