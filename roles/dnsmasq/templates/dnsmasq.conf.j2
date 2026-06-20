@@ -8,3 +8,10 @@ log-dhcp
 domain=cluster.local
 domain-needed
 bogus-priv
+
+# Static MAC reservations — always assign same IP to same Pi
+{% for host in groups['all'] %}
+{% if hostvars[host].mac_address is defined %}
+dhcp-host={{ hostvars[host].mac_address }},{{ hostvars[host].ansible_host }}
+{% endif %}
+{% endfor %}

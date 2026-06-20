@@ -118,12 +118,12 @@
   gather_facts: false
   tasks:
     - name: Pull dnsmasq image
-      command: podman pull --platform linux/arm64 dockurr/dnsmasq:latest
-
+      command: podman pull --platform linux/arm64 docker.io/dockurr/dnsmasq:latest
     - name: Build ansible-runner image
       command: podman build --platform linux/arm64 -t ansible-runner:latest -f docker/ansible-runner/Dockerfile .
       args:
         chdir: "{{ playbook_dir }}/.."
+      ignore_errors: true
 
     - name: Save dnsmasq image to tarball
       command: podman save -o /tmp/dnsmasq.tar dockurr/dnsmasq:latest

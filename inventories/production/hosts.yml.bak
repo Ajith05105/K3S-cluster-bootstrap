@@ -1,0 +1,14 @@
+all:
+  children:
+    server:
+      hosts:
+        pi-1-server:
+          ansible_host: 192.168.1.234
+          ansible_user: pi
+          mac_address: 88:a2:9e:cb:18:dc
+    workers:
+      hosts:
+        pi-2-agent:
+          ansible_host: 192.168.1.207
+          ansible_user: pi
+          mac_address: 2c:cf:67:f2:a5:23

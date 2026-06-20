@@ -1,12 +1,12 @@
 ---
 - name: Setup network on laptop
   hosts: localhost
-  gather_facts: false
+  gather_facts: true
   gather_subset:
     - '!all'
     - '!min'
     - system
-  become: true
+  connection: local
   tasks:
     - name: Configure and start dnsmasq
       include_role:
@@ -20,7 +20,6 @@
       command: python3 scripts/discovery.py
       args:
         chdir: "{{ playbook_dir }}/.."
-      become: false
 
     - meta: refresh_inventory
 
@@ -30,3 +29,4 @@
   roles:
     - k3s_prereqs
 
+    
