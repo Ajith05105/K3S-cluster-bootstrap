@@ -1,15 +1,5 @@
 ---
-- name: Discover new node
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Run node discovery
-      command: python3 scripts/discovery.py
-      args:
-        chdir: "{{ playbook_dir }}/.."
-      become: true
 
-    - meta: refresh_inventory
 
 - name: Download k3s artifacts to localhost
   hosts: localhost
@@ -32,12 +22,12 @@
         url: https://github.com/k3s-io/k3s/releases/latest/download/k3s-airgap-images-arm64.tar.zst
         dest: /tmp/k3s-airgap-images-arm64.tar.zst
 
-- name: Prepare nodes
-  hosts: all
+
+- name: Copy binaries to server nodes
+  hosts: server
   become: true
   roles:
-    - k3s_prereqs
-    - k3s_common
+    - copy_binaries
 
 - name: Install k3s server
   hosts: server
@@ -49,8 +39,3 @@
   roles:
     - k3s_server
 
-- name: Install k3s agents
-  hosts: workers
-  become: true
-  roles:
-    - k3s_agent

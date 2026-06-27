@@ -1,0 +1,9 @@
+# Temporary bootstrap DHCP — runs on laptop only
+interface={{ bootstrap_interface }}
+bind-interfaces
+dhcp-range={{ dhcp_range_start }},{{ dhcp_range_end }},{{ subnet_mask }},{{ dhcp_lease_time }}
+dhcp-leasefile=/tmp/dnsmasq.leases
+dhcp-authoritative
+port=0
+no-resolv
+log-dhcp

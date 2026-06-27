@@ -81,7 +81,7 @@ After flashing with Raspberry Pi Imager, before ejecting the SD card:
    ```yaml
    users:
    - name: pi
-     sudo: ALL=(ALL) NOPASSWD:ALL   # add this line
+     sudo: "ALL=(ALL) NOPASSWD:ALL"   # add this line
      ssh_authorized_keys:
        - ssh-ed25519 AAAA...
    ```

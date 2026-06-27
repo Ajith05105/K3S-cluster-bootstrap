@@ -1,0 +1,47 @@
+- name: Get current time from laptop
+  set_fact:
+    current_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
+  delegate_to: localhost
+
+- name: Sync time from bootstrap laptop
+  shell: |
+    timedatectl set-ntp false
+    sleep 2
+    timedatectl set-time "{{ current_time }}"
+  become: true
+
+- name: Set static IP via netplan
+  copy:
+    dest: /etc/netplan/99-static.yaml
+    mode: '0600'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth0:
+            dhcp4: false
+            addresses:
+              - {{ ansible_host }}/24
+            routes:
+              - to: default
+                via: {{bootstrap_interface_ip}}
+        
+
+- name: Remove cloud-init netplan config
+  file:
+    path: /etc/netplan/50-cloud-init.yaml
+    state: absent
+
+- name: Apply netplan
+  command: netplan apply
+
+- name: Enable cgroups in kernel cmdline
+  lineinfile:
+    path: /boot/firmware/cmdline.txt
+    backrefs: true
+    regexp: '^((?!.*cgroup_enable=memory).+)$'
+    line: '\1 cgroup_memory=1 cgroup_enable=memory'
+
+- name: Reboot nodes
+  reboot:
+    reboot_timeout: 120

@@ -1,0 +1,4 @@
+---
+dnsmasq_conf_path: /usr/local/etc/dnsmasq.conf
+dnsmasq_start_cmd: /opt/homebrew/sbin/dnsmasq -C /usr/local/etc/dnsmasq.conf
+dnsmasq_restart_cmd: pkill dnsmasq; /opt/homebrew/sbin/dnsmasq -C /usr/local/etc/dnsmasq.conf

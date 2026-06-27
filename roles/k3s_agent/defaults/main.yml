@@ -1,5 +1,0 @@
----
-k3s_binary_dest: /usr/local/bin/k3s
-k3s_install_script_dest: "/home/{{ ansible_user }}/k3s-install.sh"
-k3s_agent_service_file: /etc/systemd/system/k3s-agent.service
-k3s_data_dir: /var/lib/rancher/k3s
