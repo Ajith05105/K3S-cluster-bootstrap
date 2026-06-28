@@ -1,0 +1,67 @@
+- name: Preflight — pull and build all container images
+  hosts: localhost
+  gather_facts: true
+  tasks:
+
+    - name: Create image staging directory
+      ansible.builtin.file:
+        path: /tmp/k3s-images
+        state: directory
+        mode: '0755'
+
+    - name: Check if dnsmasq tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/dnsmasq.tar"
+      register: dnsmasq_tar
+
+    - name: Check if lease-watcher tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/lease-watcher.tar"
+      register: watcher_tar
+
+    - name: Start Podman machine
+      ansible.builtin.command: podman machine start
+      failed_when: false
+      changed_when: false
+      when:
+        - ansible_os_family == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists
+
+    - name: Pull dnsmasq image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 dockurr/dnsmasq:latest
+      when: not dnsmasq_tar.stat.exists
+
+    - name: Save dnsmasq image
+      ansible.builtin.command: >
+        podman save dockurr/dnsmasq:latest
+        -o /tmp/k3s-images/dnsmasq.tar
+      when: not dnsmasq_tar.stat.exists
+
+    - name: Build lease-watcher image for arm64
+      ansible.builtin.command: >
+        podman build
+        --platform linux/arm64
+        -t lease-watcher:latest
+        {{ playbook_dir }}/../custom_images/lease-watcher/
+      when: not watcher_tar.stat.exists
+
+    - name: Tag lease-watcher with full reference
+      ansible.builtin.command: >
+        podman tag lease-watcher:latest
+        docker.io/library/lease-watcher:latest
+      when: not watcher_tar.stat.exists
+
+    - name: Save lease-watcher image
+      ansible.builtin.command: >
+        podman save docker.io/library/lease-watcher:latest
+        -o /tmp/k3s-images/lease-watcher.tar
+      when: not watcher_tar.stat.exists
+
+    - name: Stop Podman machine
+      ansible.builtin.command: podman machine stop
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_os_family == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists

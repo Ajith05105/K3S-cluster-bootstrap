@@ -20,9 +20,15 @@
     dest: "{{ dnsmasq_conf_path }}"
   notify: restart dnsmasq
 
+- name: Check if dnsmasq is running
+  command: pgrep dnsmasq
+  register: dnsmasq_running
+  changed_when: false
+  failed_when: false
+
 - name: Start dnsmasq
   command: "{{ dnsmasq_start_cmd }}"
-  changed_when: true
+  when: dnsmasq_running.rc != 0
 
 - name: Wait for dnsmasq to be ready
   wait_for:

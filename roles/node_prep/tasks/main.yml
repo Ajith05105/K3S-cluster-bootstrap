@@ -11,6 +11,7 @@
   become: true
 
 - name: Set static IP via netplan
+  register: netplan_config
   copy:
     dest: /etc/netplan/99-static.yaml
     mode: '0600'
@@ -34,6 +35,7 @@
 
 - name: Apply netplan
   command: netplan apply
+  when: netplan_config.changed
 
 - name: Enable cgroups in kernel cmdline
   lineinfile:
@@ -41,7 +43,9 @@
     backrefs: true
     regexp: '^((?!.*cgroup_enable=memory).+)$'
     line: '\1 cgroup_memory=1 cgroup_enable=memory'
+  register: cgroups_config
 
 - name: Reboot nodes
   reboot:
     reboot_timeout: 120
+  when: netplan_config.changed or cgroups_config.changed

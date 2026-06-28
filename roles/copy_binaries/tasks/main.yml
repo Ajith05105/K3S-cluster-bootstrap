@@ -22,3 +22,15 @@
     src: "{{ k3s_local_airgap_bundle }}"
     dest: "{{ k3s_airgap_images_dir }}/k3s-airgap-images-arm64.tar.zst"
     mode: '0644'
+
+- name: Copy dnsmasq image
+  copy:
+    src: /tmp/k3s-images/dnsmasq.tar
+    dest: "{{ k3s_airgap_images_dir }}/dnsmasq.tar"
+    mode: '0644'
+
+- name: Copy lease-watcher image
+  copy:
+    src: /tmp/k3s-images/lease-watcher.tar
+    dest: "{{ k3s_airgap_images_dir }}/lease-watcher.tar"
+    mode: '0644'

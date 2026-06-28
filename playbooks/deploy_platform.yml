@@ -1,0 +1,115 @@
+---
+- name: Deploy platform components
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  tasks:
+
+    - name: Create local manifest directory
+      ansible.builtin.file:
+        path: /tmp/k8s_manifests
+        state: directory
+        mode: '0700'
+
+    # =================================================================
+    # STATIC CONFIGMAPS (Ansible Owned — Safe to overwrite)
+    # =================================================================
+
+    - name: Generate dnsmasq config manifest
+      ansible.builtin.copy:
+        dest: /tmp/k8s_manifests/dnsmasq-config.yaml
+        mode: '0600'
+        content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: dnsmasq-config
+            namespace: kube-system
+          data:
+            dnsmasq.conf: |
+              port=0
+              interface=eth0
+              bind-interfaces
+              dhcp-range=192.168.1.101,192.168.1.199,infinite
+              dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
+              dhcp-authoritative
+              log-dhcp
+              dhcp-host={{ hostvars[groups['server'][0]]['mac_address'] }},ignore
+              dhcp-host={{ hostvars[groups['server'][1]]['mac_address'] }},ignore
+              dhcp-host={{ hostvars[groups['server'][2]]['mac_address'] }},ignore
+      register: dnsmasq_manifest
+
+    - name: Apply dnsmasq config ConfigMap
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-config.yaml
+      when: dnsmasq_manifest.changed
+
+    - name: Generate control plane registry manifest
+      ansible.builtin.copy:
+        dest: /tmp/k8s_manifests/control-plane-registry.yaml
+        mode: '0600'
+        content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: control-plane-registry
+            namespace: kube-system
+          data:
+            nodes: |
+              {{ hostvars[groups['server'][0]]['mac_address'] }} {{ groups['server'][0] }} {{ hostvars[groups['server'][0]]['ansible_host'] }}
+              {{ hostvars[groups['server'][1]]['mac_address'] }} {{ groups['server'][1] }} {{ hostvars[groups['server'][1]]['ansible_host'] }}
+              {{ hostvars[groups['server'][2]]['mac_address'] }} {{ groups['server'][2] }} {{ hostvars[groups['server'][2]]['ansible_host'] }}
+      register: cp_registry_manifest
+
+    - name: Apply control plane registry ConfigMap
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/control-plane-registry.yaml
+      when: cp_registry_manifest.changed
+
+    # =================================================================
+    # DYNAMIC CONFIGMAP (lease-watcher Owned — Create once, never touch)
+    # =================================================================
+
+    - name: Check if worker registry exists
+      ansible.builtin.command: >
+        kubectl get configmap worker-registry
+        -n kube-system
+        --ignore-not-found
+      register: worker_registry_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create worker registry first time only
+      ansible.builtin.command: >
+        kubectl create configmap worker-registry
+        --namespace kube-system
+        --from-literal=workers=""
+      when: worker_registry_check.stdout == ""
+
+    # =================================================================
+    # DEPLOY DNSMASQ POD + RBAC
+    # =================================================================
+
+    - name: Copy serviceaccount manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../manifests/dnsmasq/serviceaccount.yml"
+        dest: /tmp/k8s_manifests/serviceaccount.yml
+      register: sa_manifest
+
+    - name: Apply serviceaccount and RBAC
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/serviceaccount.yml
+      when: sa_manifest.changed
+
+    - name: Copy dnsmasq deployment manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../manifests/dnsmasq/deployment.yml"
+        dest: /tmp/k8s_manifests/deployment.yml
+      register: deploy_manifest
+
+    - name: Apply dnsmasq deployment
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/deployment.yml
+      when: deploy_manifest.changed
+
+    - name: Wait for dnsmasq pod to be ready
+      ansible.builtin.command: >
+        kubectl wait --for=condition=available
+        deployment/dnsmasq -n kube-system
+        --timeout=120s
+      changed_when: false
