@@ -1,42 +1,29 @@
----
-- name: Copy k3s binary
+- name: Copy gitea image
   copy:
-    src: "{{ k3s_local_binary }}"
-    dest: "{{ k3s_binary_dest }}"
-    mode: '0755'
-
-- name: Copy k3s install script
-  copy:
-    src: "{{ k3s_local_install_script }}"
-    dest: "{{ k3s_install_script_dest }}"
-    mode: '0755'
-
-- name: Ensure k3s images directory exists
-  file:
-    path: "{{ k3s_airgap_images_dir }}"
-    state: directory
-    mode: '0755'
-
-- name: Copy k3s air-gap images
-  copy:
-    src: "{{ k3s_local_airgap_bundle }}"
-    dest: "{{ k3s_airgap_images_dir }}/k3s-airgap-images-arm64.tar.zst"
+    src: /tmp/k3s-images/gitea.tar
+    dest: "{{ k3s_airgap_images_dir }}/gitea.tar"
     mode: '0644'
 
-- name: Copy dnsmasq image
+- name: Copy argocd image
   copy:
-    src: /tmp/k3s-images/dnsmasq.tar
-    dest: "{{ k3s_airgap_images_dir }}/dnsmasq.tar"
+    src: /tmp/k3s-images/argocd.tar
+    dest: "{{ k3s_airgap_images_dir }}/argocd.tar"
     mode: '0644'
 
-- name: Copy lease-watcher image
+- name: Copy redis image
   copy:
-    src: /tmp/k3s-images/lease-watcher.tar
-    dest: "{{ k3s_airgap_images_dir }}/lease-watcher.tar"
+    src: /tmp/k3s-images/redis.tar
+    dest: "{{ k3s_airgap_images_dir }}/redis.tar"
     mode: '0644'
 
-- name: Copy ansible-runner image
+- name: Copy dex image
   copy:
-    src: /tmp/k3s-images/ansible-runner.tar
-    dest: "{{ k3s_airgap_images_dir }}/ansible-runner.tar"
+    src: /tmp/k3s-images/dex.tar
+    dest: "{{ k3s_airgap_images_dir }}/dex.tar"
+    mode: '0644'
+
+- name: Copy argocd install manifest
+  copy:
+    src: /tmp/k3s-images/argocd-install.yaml
+    dest: "/home/{{ ansible_user }}/argocd-install.yaml"
     mode: '0644'

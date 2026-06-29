@@ -1,0 +1,95 @@
+---
+- name: Create argocd namespace
+  ansible.builtin.command: kubectl create namespace argocd
+  register: ns_result
+  failed_when: ns_result.rc != 0 and 'already exists' not in ns_result.stderr
+  changed_when: ns_result.rc == 0
+
+- name: Import ArgoCD images into containerd
+  ansible.builtin.command: >
+    k3s ctr images import /var/lib/rancher/k3s/agent/images/{{ item }}
+  loop:
+    - argocd.tar
+    - redis.tar
+    - dex.tar
+
+- name: Tag redis image with expected name
+  ansible.builtin.command: >
+    k3s ctr images tag
+    public.ecr.aws/docker/library/redis:7.0.15-alpine
+    redis:7.0.15-alpine
+
+- name: Tag dex image with expected name
+  ansible.builtin.command: >
+    k3s ctr images tag
+    ghcr.io/dexidp/dex:v2.38.0
+    ghcr.io/dexidp/dex:v2.41.1
+
+- name: Patch imagePullPolicy in argocd manifest
+  ansible.builtin.command: >
+    sed -i 's/imagePullPolicy: Always/imagePullPolicy: Never/g'
+    /home/{{ ansible_user }}/argocd-install.yaml
+
+- name: Apply argocd manifest
+  ansible.builtin.command: >
+    kubectl apply --server-side --force-conflicts
+    -n argocd
+    -f /home/{{ ansible_user }}/argocd-install.yaml
+
+- name: Pin all ArgoCD deployments to control plane nodes
+  ansible.builtin.command: >
+    kubectl patch deployment {{ item }}
+    -n argocd --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/nodeSelector",
+    "value":{"node-role.kubernetes.io/control-plane":"true"}},
+    {"op":"add","path":"/spec/template/spec/tolerations",
+    "value":[{"key":"node-role.kubernetes.io/control-plane",
+    "operator":"Exists","effect":"NoSchedule"}]}]'
+  loop:
+    - argocd-server
+    - argocd-applicationset-controller
+    - argocd-notifications-controller
+    - argocd-repo-server
+    - argocd-dex-server
+    - argocd-redis
+  loop_control:
+    label: "{{ item }}"
+
+- name: Pin argocd-application-controller statefulset to control plane
+  ansible.builtin.command: >
+    kubectl patch statefulset argocd-application-controller
+    -n argocd --type=json
+    -p='[{"op":"add","path":"/spec/template/spec/nodeSelector",
+    "value":{"node-role.kubernetes.io/control-plane":"true"}},
+    {"op":"add","path":"/spec/template/spec/tolerations",
+    "value":[{"key":"node-role.kubernetes.io/control-plane",
+    "operator":"Exists","effect":"NoSchedule"}]}]'
+
+- name: Patch dex initContainer imagePullPolicy
+  ansible.builtin.command: >
+    kubectl patch deployment argocd-dex-server
+    -n argocd --type=json
+    -p='[{"op":"replace",
+    "path":"/spec/template/spec/initContainers/0/imagePullPolicy",
+    "value":"Never"}]'
+
+- name: Create manifest staging directory for argocd
+  ansible.builtin.file:
+    path: /tmp/k8s_manifests/argocd
+    state: directory
+    mode: '0700'
+
+- name: Copy argocd ingress manifest
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/argocd/ingress.yml"
+    dest: /tmp/k8s_manifests/argocd/ingress.yml
+
+- name: Apply argocd ingress
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/argocd/ingress.yml
+
+- name: Wait for argocd-server to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/argocd-server -n argocd
+    --timeout=300s
+  changed_when: false

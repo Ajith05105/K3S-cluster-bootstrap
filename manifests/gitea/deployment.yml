@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: gitea
+        image: docker.io/gitea/gitea:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 3000
+          name: http
+        - containerPort: 22
+          name: ssh
+        env:
+        - name: GITEA__database__DB_TYPE
+          value: sqlite3
+        - name: GITEA__database__PATH
+          value: /data/gitea/gitea.db
+        - name: GITEA__server__DOMAIN
+          value: gitea.cluster.local
+        - name: GITEA__server__HTTP_PORT
+          value: "3000"
+        - name: GITEA__server__ROOT_URL
+          value: http://gitea.cluster.local
+        - name: GITEA__server__OFFLINE_MODE
+          value: "true"
+        - name: GITEA__security__INSTALL_LOCK
+          value: "true"
+        - name: GITEA__service__DISABLE_REGISTRATION
+          value: "true"
+        - name: GITEA__service__REQUIRE_SIGNIN_VIEW
+          value: "true"
+        - name: GITEA__actions__ENABLED
+          value: "true"
+        - name: GITEA__actions__DEFAULT_ACTIONS_URL
+          value: self
+        - name: GITEA__packages__ENABLED
+          value: "true"
+        volumeMounts:
+        - name: gitea-data
+          mountPath: /data
+        livenessProbe:
+          httpGet:
+            path: /api/healthz
+            port: http
+          initialDelaySeconds: 60
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 10
+        readinessProbe:
+          httpGet:
+            path: /api/healthz
+            port: http
+          initialDelaySeconds: 30
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+      volumes:
+      - name: gitea-data
+        persistentVolumeClaim:
+          claimName: gitea-data
+          

@@ -1,0 +1,50 @@
+---
+- name: Create manifest staging directory
+  ansible.builtin.file:
+    path: /tmp/k8s_manifests/gitea
+    state: directory
+    mode: '0700'
+
+- name: Copy gitea manifests
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/gitea/{{ item }}"
+    dest: "/tmp/k8s_manifests/gitea/{{ item }}"
+  loop:
+    - namespace.yml
+    - pvc.yml
+    - deployment.yml
+    - service.yml
+    - ingress.yml
+
+- name: Import Gitea image into containerd
+  ansible.builtin.command: >
+    k3s ctr images import /var/lib/rancher/k3s/agent/images/gitea.tar
+
+- name: Apply gitea manifests
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/gitea/{{ item }}
+  loop:
+    - namespace.yml
+    - pvc.yml
+    - deployment.yml
+    - service.yml
+    - ingress.yml
+
+- name: Wait for gitea to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/gitea -n gitea
+    --timeout=300s
+  changed_when: false
+
+- name: Create Gitea admin user
+  ansible.builtin.command: >
+    kubectl exec -n gitea deployment/gitea --
+    su git -c "gitea admin user create
+    --username admin
+    --password admin1234
+    --email admin@cluster.local
+    --admin
+    --must-change-password=false"
+  register: gitea_admin
+  failed_when: gitea_admin.rc != 0 and 'already exists' not in gitea_admin.stderr
+  changed_when: "'successfully created' in gitea_admin.stdout"

@@ -1,0 +1,90 @@
+---
+- name: Wait for gitea to be healthy
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/gitea -n gitea
+    --timeout=60s
+  changed_when: false
+
+- name: Get Gitea ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea -n gitea
+    -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  changed_when: false
+
+- name: Create cluster-config repo in Gitea
+  ansible.builtin.command: >
+    kubectl exec -n gitea deployment/gitea --
+    curl -s -o /dev/null -w "%{http_code}"
+    -X POST http://localhost:3000/api/v1/user/repos
+    -H "Content-Type: application/json"
+    -u "admin:admin1234"
+    -d '{"name":"cluster-config","private":false,"auto_init":true,"default_branch":"main"}'
+  register: repo_result
+  failed_when: repo_result.stdout not in ['201', '409', '422']
+  changed_when: repo_result.stdout == '201'
+
+- name: Copy bootstrap repo manifests to server
+  ansible.builtin.synchronize:
+    src: "{{ playbook_dir }}/../manifests/"
+    dest: /tmp/cluster-config-manifests/
+    delete: yes
+
+- name: Configure git on server
+  ansible.builtin.shell: |
+    git config --global user.email "admin@cluster.local"
+    git config --global user.name "Bootstrap"
+  changed_when: false
+
+- name: Push manifests to Gitea
+  ansible.builtin.shell: |
+    cd /tmp/cluster-config-manifests
+    git init
+    git config --global init.defaultBranch main
+    git checkout -b main
+    git add .
+    git commit -m "chore: initial cluster manifests"
+    git remote add origin http://admin:admin1234@{{ gitea_cluster_ip.stdout }}:3000/admin/cluster-config.git
+    git push -u origin main --force
+  register: git_push
+  changed_when: "'main' in git_push.stdout"
+  failed_when: git_push.rc != 0 and 'already exists' not in git_push.stderr
+
+- name: Apply ArgoCD repo secret
+  ansible.builtin.shell: |
+    kubectl apply -f - <<EOF
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: gitea-repo
+      namespace: argocd
+      labels:
+        argocd.argoproj.io/secret-type: repository
+    type: Opaque
+    stringData:
+      type: git
+      url: http://{{ gitea_cluster_ip.stdout }}:3000/admin/cluster-config.git
+      username: admin
+      password: admin1234
+    EOF
+
+- name: Create argocd apps staging directory
+  ansible.builtin.file:
+    path: /tmp/k8s_manifests/argocd/apps
+    state: directory
+    mode: '0700'
+
+- name: Copy ArgoCD application manifests
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/argocd/apps/{{ item }}"
+    dest: "/tmp/k8s_manifests/argocd/apps/{{ item }}"
+  loop:
+    - gitea-app.yml
+    - dnsmasq-app.yml
+
+- name: Apply ArgoCD applications
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/argocd/apps/{{ item }}
+  loop:
+    - gitea-app.yml
+    - dnsmasq-app.yml

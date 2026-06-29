@@ -24,6 +24,26 @@
         path: "/tmp/k3s-images/ansible-runner.tar"
       register: runner_tar
 
+    - name: Check if gitea tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/gitea.tar"
+      register: gitea_tar
+
+    - name: Check if argocd tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/argocd.tar"
+      register: argocd_tar
+
+    - name: Check if redis tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/redis.tar"
+      register: redis_tar
+
+    - name: Check if dex tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/dex.tar"
+      register: dex_tar
+
     - name: Install QEMU for cross-platform builds (Linux only)
       ansible.builtin.apt:
         name:
@@ -41,7 +61,7 @@
 
     - name: Start Podman machine
       ansible.builtin.command: podman machine start
-      failed_when: false 
+      failed_when: false
       changed_when: false
       when:
         - ansible_facts['os_family'] == 'Darwin'
@@ -86,6 +106,55 @@
         -o /tmp/k3s-images/ansible-runner.tar
       when: not runner_tar.stat.exists
 
+    - name: Pull gitea image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 docker.io/gitea/gitea:latest
+      when: not gitea_tar.stat.exists
+
+    - name: Save gitea image
+      ansible.builtin.command: >
+        podman save docker.io/gitea/gitea:latest
+        -o /tmp/k3s-images/gitea.tar
+      when: not gitea_tar.stat.exists
+
+    - name: Pull argocd image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 quay.io/argoproj/argocd:v2.13.3
+      when: not argocd_tar.stat.exists
+
+    - name: Save argocd image
+      ansible.builtin.command: >
+        podman save quay.io/argoproj/argocd:v2.13.3
+        -o /tmp/k3s-images/argocd.tar
+      when: not argocd_tar.stat.exists
+
+    - name: Pull redis image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 public.ecr.aws/docker/library/redis:7.0.15-alpine
+      when: not redis_tar.stat.exists
+
+    - name: Save redis image
+      ansible.builtin.command: >
+        podman save public.ecr.aws/docker/library/redis:7.0.15-alpine
+        -o /tmp/k3s-images/redis.tar
+      when: not redis_tar.stat.exists
+
+    - name: Pull dex image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 ghcr.io/dexidp/dex:v2.41.1
+      when: not dex_tar.stat.exists
+
+    - name: Save dex image
+      ansible.builtin.command: >
+        podman save ghcr.io/dexidp/dex:v2.41.1
+        -o /tmp/k3s-images/dex.tar
+      when: not dex_tar.stat.exists
+
+    - name: Download ArgoCD install manifest
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml
+        dest: /tmp/k3s-images/argocd-install.yaml
+        mode: '0644'
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
@@ -94,4 +163,3 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
-
