@@ -43,6 +43,25 @@
   set_fact:
     k3s_token: "{{ node_token.content | b64decode | trim }}"
 
+- name: Check if k3s join token secret exists
+  ansible.builtin.command: >
+    kubectl get secret k3s-join-token
+    -n kube-system
+    --ignore-not-found
+  register: token_check
+  changed_when: false
+  failed_when: false
+  when: k3s_cluster_init | bool
+
+- name: Create k3s join token secret
+  ansible.builtin.command: >
+    kubectl create secret generic k3s-join-token
+    --namespace kube-system
+    --from-literal=token={{ k3s_token }}
+  when:
+    - k3s_cluster_init | bool
+    - token_check.stdout == ""
+
 - name: Wait for all nodes to be ready
   command: kubectl get nodes
   register: nodes_output

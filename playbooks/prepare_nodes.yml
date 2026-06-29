@@ -24,3 +24,12 @@
   become: true
   roles:
     - node_prep
+
+- name: Stop laptop DHCP
+  hosts: localhost
+  become: true
+  tasks:
+    - name: Kill dnsmasq
+      command: pkill dnsmasq
+      failed_when: false
+      changed_when: true

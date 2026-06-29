@@ -113,3 +113,68 @@
         deployment/dnsmasq -n kube-system
         --timeout=120s
       changed_when: false
+
+
+    # =================================================================
+    # SECRETS FOR ANSIBLE RUNNER
+    # =================================================================
+
+    - name: Check if ansible-runner key secret exists
+      ansible.builtin.command: >
+        kubectl get secret ansible-runner-key
+        -n kube-system
+        --ignore-not-found
+      register: secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Copy ansible-runner private key to server
+      ansible.builtin.copy:
+        src: "{{ ansible_runner_private_key }}"
+        dest: /tmp/ansible_runner_key
+        mode: '0600'
+      when: secret_check.stdout == ""
+
+    - name: Create ansible-runner SSH key secret
+      ansible.builtin.command: >
+        kubectl create secret generic ansible-runner-key
+        --namespace kube-system
+        --from-file=private-key=/tmp/ansible_runner_key
+      when: secret_check.stdout == ""
+
+    - name: Remove key from server
+      ansible.builtin.file:
+        path: /tmp/ansible_runner_key
+        state: absent
+
+
+    # =================================================================
+    # DEPLOY PROVISIONING POD + RBAC
+    # =================================================================
+
+    - name: Copy ansible-runner serviceaccount manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../manifests/ansible-runner/serviceaccount.yml"
+        dest: /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
+      register: runner_sa_manifest
+
+    - name: Apply ansible-runner serviceaccount and RBAC
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
+      when: runner_sa_manifest.changed
+
+    - name: Copy ansible-runner deployment manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../manifests/ansible-runner/deployment.yml"
+        dest: /tmp/k8s_manifests/ansible-runner-deployment.yml
+      register: runner_deploy_manifest
+
+    - name: Apply ansible-runner deployment
+      ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-deployment.yml
+      when: runner_deploy_manifest.changed
+
+    - name: Wait for ansible-runner pod to be ready
+      ansible.builtin.command: >
+        kubectl wait --for=condition=available
+        deployment/ansible-runner -n kube-system
+        --timeout=120s
+      changed_when: false

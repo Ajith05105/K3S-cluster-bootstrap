@@ -34,3 +34,9 @@
     src: /tmp/k3s-images/lease-watcher.tar
     dest: "{{ k3s_airgap_images_dir }}/lease-watcher.tar"
     mode: '0644'
+
+- name: Copy ansible-runner image
+  copy:
+    src: /tmp/k3s-images/ansible-runner.tar
+    dest: "{{ k3s_airgap_images_dir }}/ansible-runner.tar"
+    mode: '0644'

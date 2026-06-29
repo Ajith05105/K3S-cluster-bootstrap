@@ -19,13 +19,18 @@
         path: "/tmp/k3s-images/lease-watcher.tar"
       register: watcher_tar
 
+    - name: Check if ansible-runner tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/ansible-runner.tar"
+      register: runner_tar
+
     - name: Start Podman machine
       ansible.builtin.command: podman machine start
-      failed_when: false
+      failed_when: false 
       changed_when: false
       when:
-        - ansible_os_family == 'Darwin'
-        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists
+        - ansible_facts['os_family'] == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
 
     - name: Pull dnsmasq image for arm64
       ansible.builtin.command: >
@@ -46,22 +51,32 @@
         {{ playbook_dir }}/../custom_images/lease-watcher/
       when: not watcher_tar.stat.exists
 
-    - name: Tag lease-watcher with full reference
-      ansible.builtin.command: >
-        podman tag lease-watcher:latest
-        docker.io/library/lease-watcher:latest
-      when: not watcher_tar.stat.exists
-
     - name: Save lease-watcher image
       ansible.builtin.command: >
-        podman save docker.io/library/lease-watcher:latest
+        podman save localhost/lease-watcher:latest
         -o /tmp/k3s-images/lease-watcher.tar
       when: not watcher_tar.stat.exists
+
+    - name: Build ansible-runner
+      ansible.builtin.command: >
+        podman build
+        --platform linux/arm64
+        -t ansible-runner:latest
+        {{ playbook_dir }}/../custom_images/ansible-runner/
+      when: not runner_tar.stat.exists
+
+    - name: Save ansible-runner image
+      ansible.builtin.command: >
+        podman save localhost/ansible-runner:latest
+        -o /tmp/k3s-images/ansible-runner.tar
+      when: not runner_tar.stat.exists
+
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
       changed_when: false
       failed_when: false
       when:
-        - ansible_os_family == 'Darwin'
-        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists
+        - ansible_facts['os_family'] == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+

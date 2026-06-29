@@ -38,7 +38,7 @@ spec:
               mountPath: /var/lib/dnsmasq
 
         - name: lease-watcher
-          image: docker.io/library/lease-watcher:latest
+          image: localhost/lease-watcher:latest
           imagePullPolicy: Never
           volumeMounts:
             - name: leases
