@@ -1,136 +1,131 @@
 # k3s Cluster Bootstrap Playbook
 
-Automated bare-metal k3s cluster deployment on Raspberry Pi 5 using Ansible. Runs a full pipeline from network discovery to a working k3s cluster with a single command.
+Automated bare-metal K3s cluster deployment on Raspberry Pi 5. One command takes you from powered-off Pis to a self-healing HA control plane that manages itself after the laptop is unplugged.
 
 ## How It Works
 
 ```
-Laptop (dnsmasq + discovery) → node prep → k3s install → preflight verification
+ansible-playbook playbooks/site.yml
+        │
+        ├── preflight.yml              → build custom ARM64 images on laptop
+        ├── prepare_nodes.yml          → DHCP → discover Pis → static IP + cgroups
+        ├── bootstrap_control_plane.yml → install k3s HA cluster (serial)
+        └── deploy_platform.yml        → deploy dnsmasq + ansible-runner into cluster
 ```
 
-0. **(manual, before running anything)** — start dnsmasq on the laptop as a temporary DHCP server: `python3 scripts/dnsmasq_setup.py start`
-1. **prepare** — waits for Pis to boot, SSHes in to discover hostnames, writes the Ansible inventory, then prepares each node (cgroups, cloud-init)
-2. **bootstrap** — copies the k3s binary and install script to each node, installs k3s server on the control plane, installs k3s agents on workers
-3. **preflight** — verifies k3s is installed and services are active on all nodes
+After `deploy_platform.yml` completes, the laptop can be unplugged. The cluster runs a **dnsmasq pod** as its own DHCP server and an **ansible-runner pod** that auto-joins new nodes when they boot — no human intervention needed.
 
 ## Requirements
 
-**Bootstrap laptop** (macOS or Linux):
-- Python 3 with `paramiko` and `pyyaml` — `pip install paramiko pyyaml`
-- Ansible — `pip install ansible`
-- dnsmasq — `brew install dnsmasq` (macOS) or `apt install dnsmasq` (Linux)
+**Bootstrap laptop** (Ubuntu 24.04 or macOS):
+- Ansible: `pip install ansible`
+- Podman: `apt install podman`
+- QEMU for ARM64 cross-builds: `apt install qemu-user-static binfmt-support`
+- USB ethernet adapter connected to the Pi switch
 
-**Raspberry Pi 5**:
-- Ubuntu Server 24.04 LTS flashed via Raspberry Pi Imager
-- SSH public key injected via Imager
-- Passwordless sudo configured in `user-data` (see Pi Setup below)
+**Raspberry Pi 5 nodes**:
+- Ubuntu Server 24.04 LTS (64-bit), flashed via Raspberry Pi Imager
+- SSH public key injected at flash time
+- Passwordless sudo configured in `user-data` (see below)
+- Ethernet connected to switch — no WiFi
 
-## Flashing with Raspberry Pi Imager
-
-1. Open Raspberry Pi Imager and set the following:
-   - **Raspberry Pi Device** → Raspberry Pi 5
-   - **Operating System** → Other general-purpose OS → Ubuntu → **Ubuntu Server 24.04 LTS (64-bit)**
-   - **Storage** → select your SD card or USB drive
-
-2. Click **Next** → **Edit Settings**
-
-3. Under the **Customisation** tab:
-   - Set hostname: `pi-server` for the control plane, `pi-agent` for workers
-   - Set username: `pi` (must be `pi` — the playbook expects this)
-   - Leave the password field as-is (it will be ignored)
-   - **Skip WiFi configuration** — connect via ethernet only
-
-4. Under the **Remote Access** tab:
-   - Check **Enable SSH**
-   - Select **Allow public-key authentication only**
-   - Paste your SSH public key into the field (see below)
-
-5. Click **Save** → **Yes** → **Write**
-
-### Generating an SSH key
-
-If you don't already have one:
+**Two SSH key pairs**:
+- `~/.ssh/id_ed25519` — your personal key, used by Ansible during bootstrap
+- `~/.ssh/ansible_runner_key` — a separate key stored as a Kubernetes Secret, used by the in-cluster runner to auto-join new agents
 
 ```bash
-ssh-keygen -t ed25519 -C "your_email@example.com"
+ssh-keygen -t ed25519 -f ~/.ssh/ansible_runner_key -N ""
 ```
 
-Press Enter to accept the default location (`~/.ssh/id_ed25519`). Leave the passphrase empty for a fully automated setup.
+## Flashing the Pis
 
-To copy your public key to paste into the Imager:
+In Raspberry Pi Imager, select:
+- Device: Raspberry Pi 5
+- OS: Ubuntu Server 24.04 LTS (64-bit)
 
-```bash
-# macOS
-pbcopy < ~/.ssh/id_ed25519.pub
+Under **Customisation**:
+- Hostname: include `server` in the name for control plane nodes (e.g. `server-1`, `server-2`). Anything else becomes a worker.
+- Username: `pi` — must be `pi`, this is expected by the playbook
+- Skip WiFi
 
-# Linux
-cat ~/.ssh/id_ed25519.pub
+Under **Remote Access**:
+- Enable SSH → public-key only
+- Paste `~/.ssh/id_ed25519.pub`
+
+Before ejecting, open `user-data` on the `system-boot` partition and add passwordless sudo and both public keys:
+
+```yaml
+users:
+  - name: pi
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA...   # id_ed25519.pub — your personal key
+      - ssh-ed25519 BBBB...   # ansible_runner_key.pub — for in-cluster runner
 ```
-
-## Pi Setup
-
-After flashing with Raspberry Pi Imager, before ejecting the SD card:
-
-1. Open the `user-data` file on the `system-boot` partition:
-   ```bash
-   nano /Volumes/system-boot/user-data      # macOS
-   nano /media/$USER/system-boot/user-data  # Linux
-   ```
-
-2. Add `sudo: ALL=(ALL) NOPASSWD:ALL` to your user block:
-   ```yaml
-   users:
-   - name: pi
-     sudo: "ALL=(ALL) NOPASSWD:ALL"   # add this line
-     ssh_authorized_keys:
-       - ssh-ed25519 AAAA...
-   ```
-
-
-
 
 ## Configuration
 
-Copy the example config and fill in your values:
+```bash
+cp inventories/production/group_vars/all.yml.example inventories/production/group_vars/all.yml
+```
 
-
-
-Key settings in `all.yml`:
+Edit `all.yml` — key values:
 
 ```yaml
-ansible_ssh_private_key_file: ~/.ssh/id_ed25519
 ansible_user: pi
-k3s_token: <your-cluster-secret>
+ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+ansible_runner_private_key: ~/.ssh/ansible_runner_key
+ansible_runner_public_key: ~/.ssh/ansible_runner_key.pub
 
-bootstrap_interface: en8          # laptop's interface connected to the Pi switch
-bootstrap_interface_ip: 192.168.1.100
+k3s_token: <any-long-random-string>
+
+bootstrap_interface: enxa0cec892dc0f   # your USB ethernet adapter — check with: ip a
+bootstrap_interface_ip: 192.168.1.100  # IP to assign your laptop on that interface
 dhcp_range_start: 192.168.1.200
 dhcp_range_end: 192.168.1.254
 subnet_mask: 255.255.255.0
 ```
 
-> `all.yml`, `hosts.yml` are gitignored — never committed.
+> `all.yml` and `hosts.yml` are gitignored — never committed. They contain secrets and environment-specific config.
 
 ## Usage
 
-Connect your laptop to the same switch as the Pis, then run:
+1. Plug your USB ethernet adapter into the switch. Do **not** power on the Pis yet.
+
+2. Assign your laptop a static IP on the ethernet interface:
+   ```bash
+   sudo ip addr add 192.168.1.100/24 dev enxa0cec892dc0f
+   ```
+
+3. Run:
+   ```bash
+   ansible-playbook playbooks/site.yml
+   ```
+
+4. When prompted, power on all Pis then press Enter. The rest is automatic.
+
+To run individual stages:
 
 ```bash
-ansible-playbook playbooks/site.yml
+ansible-playbook playbooks/preflight.yml          # build images only
+ansible-playbook playbooks/prepare_nodes.yml      # DHCP + discovery + node prep
+ansible-playbook playbooks/bootstrap_control_plane.yml  # k3s install
+ansible-playbook playbooks/deploy_platform.yml    # in-cluster services
 ```
 
-You will be prompted once for your laptop's sudo password (needed to start dnsmasq). Power on the Pis when prompted, then press Enter. The rest is automatic.
+## Self-Healing Agent Join
 
-To uninstall k3s from all nodes:
+Once deployed, adding a new node requires zero manual steps:
+
+1. Flash a new Pi — include both SSH keys in `user-data`
+2. Set hostname: `server` in name → control plane, anything else → agent
+3. Plug into switch and power on
+
+The **lease-watcher** sidecar detects the new DHCP lease. The **ansible-runner** pod SSHes in and joins it to the cluster. Check logs:
 
 ```bash
-ansible-playbook playbooks/uninstall.yml
-```
-
-To verify cluster state at any time:
-
-```bash
-ansible-playbook playbooks/preflight.yml
+kubectl logs -n kube-system -l app=ansible-runner -f
+kubectl exec -n kube-system -l app=dnsmasq -- cat /var/lib/dnsmasq/dnsmasq.leases
 ```
 
 ## Project Structure
@@ -138,30 +133,45 @@ ansible-playbook playbooks/preflight.yml
 ```
 .
 ├── playbooks/
-│   ├── site.yml          # entry point — runs prepare → bootstrap → preflight
-│   ├── prepare.yml       # dnsmasq, discovery, node prep
-│   ├── bootstrap.yml     # k3s install
-│   ├── preflight.yml     # verification
-│   └── uninstall.yml     # teardown
+│   ├── site.yml                     # entry point
+│   ├── preflight.yml                # build custom ARM64 images
+│   ├── prepare_nodes.yml            # DHCP, discovery, node prep
+│   ├── bootstrap_control_plane.yml  # k3s install
+│   └── deploy_platform.yml          # in-cluster dnsmasq + ansible-runner
 ├── roles/
-│   ├── dnsmasq/          # configures and starts dnsmasq on the bootstrap laptop
-│   ├── k3s_prereqs/      # enables cgroups, fixes cloud-init hostname
-│   ├── k3s_common/       # time sync, copies k3s binary to nodes
-│   ├── k3s_server/       # installs k3s control plane
-│   └── k3s_agent/        # installs k3s worker agents
-├── inventories/
-│   └── production/
-│       ├── hosts.yml           # generated by discovery — gitignored
-│       └── group_vars/
-│           ├── all.yml         # your config — gitignored
-│           └── server.yml      # server-specific vars (k3s token) — gitignored
-└── scripts/
-    └── discovery.py      # reads dnsmasq leases, SSHes into nodes, writes hosts.yml
+│   ├── laptop_dhcp/                 # dnsmasq DHCP on bootstrap laptop
+│   ├── node_prep/                   # static IP, cgroups, reboot
+│   ├── copy_binaries/               # copy k3s binary + images to nodes
+│   ├── k3s_server/                  # install k3s control plane
+│   ├── platform_configmaps/         # ConfigMaps for dnsmasq config + node registry
+│   ├── deploy_dnsmasq/              # deploy in-cluster DHCP pod
+│   └── deploy_ansible_runner/       # deploy in-cluster Ansible runner pod
+├── custom_images/
+│   ├── dnsmasq/                     # in-cluster DHCP server (ARM64)
+│   ├── lease-watcher/               # watches leases, triggers agent join
+│   └── ansible-runner/              # Ansible + SSH, runs inside cluster
+├── manifests/
+│   ├── dnsmasq/                     # Deployment + ServiceAccount
+│   └── ansible-runner/              # Deployment + ServiceAccount
+├── scripts/
+│   └── discovery.py                 # reads dnsmasq leases → writes hosts.yml
+└── inventories/production/
+    ├── hosts.yml                    # auto-generated by discovery — gitignored
+    └── group_vars/
+        ├── all.yml                  # your config — gitignored
+        └── all.yml.example          # start here
 ```
+
+## Known Limitations
+
+- `dnsmasq-config.yaml.j2` has a hardcoded DHCP range (`192.168.1.101–199`) and interface (`eth0`) — these should become variables in `all.yml`
+- `node_prep` hardcodes `eth0` as the Pi ethernet interface name — may differ on some hardware
+- `bootstrap_control_plane.yml` downloads the latest k3s with no pinned version — pin `k3s_version` in `all.yml` for reproducible deployments
+- Joining servers use server-1's raw IP rather than a VIP — for true HA the join URL should point to a kube-vip virtual IP
 
 ## Hardware
 
 Tested on:
-- Raspberry Pi 5 (ARM64)
+- Raspberry Pi 5 (ARM64, 8GB)
 - Ubuntu Server 24.04 LTS
-- Bootstrap laptop: macOS (Apple Silicon)
+- Bootstrap laptop: Ubuntu 24.04 MATE with TP-Link UE300 USB ethernet adapter
