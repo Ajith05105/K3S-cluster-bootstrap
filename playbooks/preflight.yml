@@ -24,6 +24,21 @@
         path: "/tmp/k3s-images/ansible-runner.tar"
       register: runner_tar
 
+    - name: Install QEMU for cross-platform builds (Linux only)
+      ansible.builtin.apt:
+        name:
+          - qemu-user-static
+          - binfmt-support
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+      become: true
+
+    - name: Register QEMU binary formats
+      ansible.builtin.command: update-binfmts --enable qemu-aarch64
+      when: ansible_facts['os_family'] == 'Debian'
+      become: true
+      changed_when: false
+
     - name: Start Podman machine
       ansible.builtin.command: podman machine start
       failed_when: false 
