@@ -1,0 +1,27 @@
+---
+- name: Copy dnsmasq serviceaccount manifest
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/dnsmasq/serviceaccount.yml"
+    dest: /tmp/k8s_manifests/dnsmasq-serviceaccount.yml
+  register: sa_manifest
+
+- name: Apply dnsmasq serviceaccount and RBAC
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-serviceaccount.yml
+  when: sa_manifest.changed
+
+- name: Copy dnsmasq deployment manifest
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/dnsmasq/deployment.yml"
+    dest: /tmp/k8s_manifests/dnsmasq-deployment.yml
+  register: deploy_manifest
+
+- name: Apply dnsmasq deployment
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-deployment.yml
+  when: deploy_manifest.changed
+
+- name: Wait for dnsmasq pod to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/dnsmasq -n kube-system
+    --timeout=120s
+  changed_when: false
