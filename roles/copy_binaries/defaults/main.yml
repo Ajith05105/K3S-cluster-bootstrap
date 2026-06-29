@@ -1,0 +1,7 @@
+---
+k3s_local_binary: /tmp/k3s
+k3s_local_install_script: /tmp/k3s-install.sh
+k3s_local_airgap_bundle: /tmp/k3s-airgap-images-arm64.tar.zst
+k3s_binary_dest: /usr/local/bin/k3s
+k3s_install_script_dest: "/home/{{ ansible_user }}/k3s-install.sh"
+k3s_airgap_images_dir: /var/lib/rancher/k3s/agent/images

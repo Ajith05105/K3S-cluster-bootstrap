@@ -1,0 +1,4 @@
+---
+dnsmasq_conf_path: /etc/dnsmasq.conf
+dnsmasq_start_cmd: systemctl start dnsmasq
+dnsmasq_restart_cmd: systemctl restart dnsmasq

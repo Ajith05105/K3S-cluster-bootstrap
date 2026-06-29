@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnsmasq
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dnsmasq
+  template:
+    metadata:
+      labels:
+        app: dnsmasq
+    spec:
+      hostNetwork: true
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      serviceAccountName: lease-watcher
+      containers:
+        - name: dnsmasq
+          image: dockurr/dnsmasq:latest
+          imagePullPolicy: Never
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          volumeMounts:
+            - name: dnsmasq-config
+              mountPath: /etc/dnsmasq.conf
+              subPath: dnsmasq.conf
+            - name: leases
+              mountPath: /var/lib/dnsmasq
+
+        - name: lease-watcher
+          image: localhost/lease-watcher:latest
+          imagePullPolicy: Never
+          volumeMounts:
+            - name: leases
+              mountPath: /var/lib/dnsmasq
+
+      volumes:
+        - name: dnsmasq-config
+          configMap:
+            name: dnsmasq-config
+        - name: leases
+          emptyDir: {}

@@ -1,120 +1,97 @@
----
-# =============================================================================
-# Preflight Playbook
-# =============================================================================
-# Runs on the BOOTSTRAP MACHINE ONLY (localhost) — not on any Pi node.
-# Requires internet access on the bootstrap machine.
-#
-# What it does:
-#   - Downloads K3s binary, install script, and air-gap image bundle
-#   - Pulls all required container images as ARM64 via Podman
-#   - Saves all images as tar files
-#   - Verifies everything is present and correct architecture before proceeding
-#
-# Prerequisites:
-#   - Podman installed and machine running (podman machine start)
-#   - Internet access on this machine
-#
-# Output:
-#   - All artifacts staged at staging_dir (defined in group_vars/all.yml)
-#
-# Run with:
-#   ansible-playbook playbooks/preflight.yml
-#
-# Next step:
-#   ansible-playbook playbooks/bootstrap.yml
-# =============================================================================
-
-- name: Preflight — Download and stage all artifacts on bootstrap machine
+- name: Preflight — pull and build all container images
   hosts: localhost
-  connection: local
-  gather_facts: false
-  vars_files:
-    - ../inventories/production/group_vars/all.yml
-
+  gather_facts: true
   tasks:
 
-    - name: Verify Podman is installed
-      command: podman --version
-      register: podman_check
-      failed_when: podman_check.rc != 0
-      changed_when: false
-
-    - name: Create staging directory
-      file:
-        path: "{{ staging_dir }}"
+    - name: Create image staging directory
+      ansible.builtin.file:
+        path: /tmp/k3s-images
         state: directory
         mode: '0755'
 
-    - name: Download K3s binary (ARM64)
-      get_url:
-        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-arm64"
-        dest: "{{ staging_dir }}/k3s"
-        mode: '0755'
-        timeout: 120
+    - name: Check if dnsmasq tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/dnsmasq.tar"
+      register: dnsmasq_tar
 
-    - name: Download K3s install script
-      get_url:
-        url: https://get.k3s.io
-        dest: "{{ staging_dir }}/k3s-install.sh"
-        mode: '0755'
-        timeout: 60
+    - name: Check if lease-watcher tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/lease-watcher.tar"
+      register: watcher_tar
 
-    - name: Download K3s air-gap image bundle — may take several minutes
-      get_url:
-        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-airgap-images-arm64.tar.zst"
-        dest: "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
-        timeout: 600
+    - name: Check if ansible-runner tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/ansible-runner.tar"
+      register: runner_tar
 
-    - name: Pull container images as ARM64
-      command: podman pull --platform linux/arm64 {{ item.image }}
-      loop: "{{ container_images }}"
-      loop_control:
-        label: "{{ item.name }}"
+    - name: Install QEMU for cross-platform builds (Linux only)
+      ansible.builtin.apt:
+        name:
+          - qemu-user-static
+          - binfmt-support
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+      become: true
 
-    - name: Verify each image is ARM64
-      command: podman inspect {{ item.image }} --format '{{ "{{" }}.Architecture{{ "}}" }}'
-      loop: "{{ container_images }}"
-      loop_control:
-        label: "{{ item.name }}"
-      register: arch_checks
+    - name: Register QEMU binary formats
+      ansible.builtin.command: update-binfmts --enable qemu-aarch64
+      when: ansible_facts['os_family'] == 'Debian'
+      become: true
       changed_when: false
 
-    - name: Fail if any image is not arm64
-      fail:
-        msg: "{{ item.item.name }} pulled as {{ item.stdout }} not arm64 — check Podman platform support"
-      loop: "{{ arch_checks.results }}"
-      when: item.stdout != "arm64"
+    - name: Start Podman machine
+      ansible.builtin.command: podman machine start
+      failed_when: false 
+      changed_when: false
+      when:
+        - ansible_facts['os_family'] == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
 
-    - name: Save images as tar files
-      command: podman save {{ item.image }} -o {{ staging_dir }}/{{ item.name }}-arm64.tar
-      loop: "{{ container_images }}"
-      loop_control:
-        label: "{{ item.name }}"
+    - name: Pull dnsmasq image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64 docker.io/dockurr/dnsmasq:latest
+      when: not dnsmasq_tar.stat.exists
 
-    - name: Verify all artifacts present and non-empty
-      stat:
-        path: "{{ item }}"
-      loop:
-        - "{{ staging_dir }}/k3s"
-        - "{{ staging_dir }}/k3s-install.sh"
-        - "{{ staging_dir }}/k3s-airgap-images-arm64.tar.zst"
-        - "{{ staging_dir }}/registry-arm64.tar"
-        - "{{ staging_dir }}/gitea-arm64.tar"
-        - "{{ staging_dir }}/argocd-arm64.tar"
-        - "{{ staging_dir }}/redis-arm64.tar"
-        - "{{ staging_dir }}/dex-arm64.tar"
-        - "{{ staging_dir }}/nginx-arm64.tar"
-      register: artifact_checks
+    - name: Save dnsmasq image
+      ansible.builtin.command: >
+        podman save dockurr/dnsmasq:latest
+        -o /tmp/k3s-images/dnsmasq.tar
+      when: not dnsmasq_tar.stat.exists
 
-    - name: Fail if any artifact missing or empty
-      fail:
-        msg: "Missing or empty: {{ item.item }}"
-      loop: "{{ artifact_checks.results }}"
-      when: not item.stat.exists or item.stat.size == 0
+    - name: Build lease-watcher image for arm64
+      ansible.builtin.command: >
+        podman build
+        --platform linux/arm64
+        -t lease-watcher:latest
+        {{ playbook_dir }}/../custom_images/lease-watcher/
+      when: not watcher_tar.stat.exists
 
-    - name: Preflight complete
-      debug:
-        msg: |
-          All artifacts staged at {{ staging_dir }}
-          Ready to run: ansible-playbook playbooks/bootstrap.yml
+    - name: Save lease-watcher image
+      ansible.builtin.command: >
+        podman save localhost/lease-watcher:latest
+        -o /tmp/k3s-images/lease-watcher.tar
+      when: not watcher_tar.stat.exists
+
+    - name: Build ansible-runner
+      ansible.builtin.command: >
+        podman build
+        --platform linux/arm64
+        -t ansible-runner:latest
+        {{ playbook_dir }}/../custom_images/ansible-runner/
+      when: not runner_tar.stat.exists
+
+    - name: Save ansible-runner image
+      ansible.builtin.command: >
+        podman save localhost/ansible-runner:latest
+        -o /tmp/k3s-images/ansible-runner.tar
+      when: not runner_tar.stat.exists
+
+
+    - name: Stop Podman machine
+      ansible.builtin.command: podman machine stop
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts['os_family'] == 'Darwin'
+        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+

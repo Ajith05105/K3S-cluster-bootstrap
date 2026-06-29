@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dnsmasq-config
+  namespace: kube-system
+data:
+  dnsmasq.conf: |
+    port=0
+    interface=eth0
+    bind-interfaces
+    dhcp-range=192.168.1.101,192.168.1.199,infinite
+    dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
+    dhcp-authoritative
+    log-dhcp
+{% for host in groups['server'] %}
+    dhcp-host={{ hostvars[host]['mac_address'] }},ignore
+{% endfor %}

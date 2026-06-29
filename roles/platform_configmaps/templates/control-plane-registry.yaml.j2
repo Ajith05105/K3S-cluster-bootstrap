@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-plane-registry
+  namespace: kube-system
+data:
+  nodes: |
+{% for host in groups['server'] %}
+    {{ hostvars[host]['mac_address'] }} {{ host }} {{ hostvars[host]['ansible_host'] }}
+{% endfor %}

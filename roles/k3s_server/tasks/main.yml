@@ -4,17 +4,35 @@
     path: "{{ k3s_server_service_file }}"
   register: k3s_service
 
-- name: Install k3s server
+- name: Install k3s server (first control plane - cluster init)
   shell: >
     INSTALL_K3S_SKIP_DOWNLOAD=true
     K3S_TOKEN={{ k3s_token }}
     {{ k3s_install_script_dest }} server --cluster-init
-  when: not k3s_service.stat.exists
+  when:
+    - not k3s_service.stat.exists
+    - k3s_cluster_init | bool
+
+- name: Wait for first control plane to be ready
+  wait_for:
+    path: "{{ k3s_data_dir }}/server/node-token"
+    timeout: 120
+  when: k3s_cluster_init | bool
+
+- name: Install k3s server (joining existing cluster)
+  shell: >
+    INSTALL_K3S_SKIP_DOWNLOAD=true
+    K3S_TOKEN={{ k3s_token }}
+    {{ k3s_install_script_dest }} server
+    --server https://{{ k3s_server_url }}:6443
+  when:
+    - not k3s_service.stat.exists
+    - not (k3s_cluster_init | bool)
 
 - name: Wait for node token to be ready
   wait_for:
     path: "{{ k3s_data_dir }}/server/node-token"
-    timeout: 60
+    timeout: 120
 
 - name: Get node token
   slurp:
@@ -25,6 +43,25 @@
   set_fact:
     k3s_token: "{{ node_token.content | b64decode | trim }}"
 
+- name: Check if k3s join token secret exists
+  ansible.builtin.command: >
+    kubectl get secret k3s-join-token
+    -n kube-system
+    --ignore-not-found
+  register: token_check
+  changed_when: false
+  failed_when: false
+  when: k3s_cluster_init | bool
+
+- name: Create k3s join token secret
+  ansible.builtin.command: >
+    kubectl create secret generic k3s-join-token
+    --namespace kube-system
+    --from-literal=token={{ k3s_token }}
+  when:
+    - k3s_cluster_init | bool
+    - token_check.stdout == ""
+
 - name: Wait for all nodes to be ready
   command: kubectl get nodes
   register: nodes_output
@@ -32,3 +69,4 @@
   delay: 15
   until: nodes_output.rc == 0
   changed_when: false
+  when: k3s_cluster_init | bool

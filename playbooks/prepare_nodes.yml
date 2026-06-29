@@ -1,0 +1,35 @@
+- name: Setup DHCP on laptop
+  hosts: localhost
+  become: true
+  roles:
+    - laptop_dhcp
+
+- name: Discover nodes
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Wait for Pis to boot
+      pause:
+        prompt: "Boot your Pis and press Enter when ready..."
+
+    - name: Run node discovery
+      command: python3 scripts/discovery.py
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+    - meta: refresh_inventory
+
+- name: Prepare Pi nodes
+  hosts: server
+  become: true
+  roles:
+    - node_prep
+
+- name: Stop laptop DHCP
+  hosts: localhost
+  become: true
+  tasks:
+    - name: Kill dnsmasq
+      command: pkill dnsmasq
+      failed_when: false
+      changed_when: true

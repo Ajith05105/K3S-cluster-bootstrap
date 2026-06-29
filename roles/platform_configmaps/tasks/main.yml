@@ -1,0 +1,44 @@
+---
+- name: Create local manifest directory
+  ansible.builtin.file:
+    path: /tmp/k8s_manifests
+    state: directory
+    mode: '0700'
+
+- name: Generate dnsmasq config manifest
+  ansible.builtin.template:
+    src: dnsmasq-config.yaml.j2
+    dest: /tmp/k8s_manifests/dnsmasq-config.yaml
+    mode: '0600'
+  register: dnsmasq_manifest
+
+- name: Apply dnsmasq config ConfigMap
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-config.yaml
+  when: dnsmasq_manifest.changed
+
+- name: Generate control plane registry manifest
+  ansible.builtin.template:
+    src: control-plane-registry.yaml.j2
+    dest: /tmp/k8s_manifests/control-plane-registry.yaml
+    mode: '0600'
+  register: cp_registry_manifest
+
+- name: Apply control plane registry ConfigMap
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/control-plane-registry.yaml
+  when: cp_registry_manifest.changed
+
+- name: Check if worker registry exists
+  ansible.builtin.command: >
+    kubectl get configmap worker-registry
+    -n kube-system
+    --ignore-not-found
+  register: worker_registry_check
+  changed_when: false
+  failed_when: false
+
+- name: Create worker registry first time only
+  ansible.builtin.command: >
+    kubectl create configmap worker-registry
+    --namespace kube-system
+    --from-literal=workers=""
+  when: worker_registry_check.stdout == ""
