@@ -49,7 +49,7 @@
 
     - name: Pull dnsmasq image for arm64
       ansible.builtin.command: >
-        podman pull --platform linux/arm64 dockurr/dnsmasq:latest
+        podman pull --platform linux/arm64 docker.io/dockurr/dnsmasq:latest
       when: not dnsmasq_tar.stat.exists
 
     - name: Save dnsmasq image

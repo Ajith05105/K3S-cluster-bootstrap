@@ -26,12 +26,12 @@
   changed_when: false
   failed_when: false
 
-- name: Start dnsmasq
-  command: "{{ dnsmasq_start_cmd }}"
-  when: dnsmasq_running.rc != 0
+- name: Restart dnsmasq
+  command: "{{ dnsmasq_restart_cmd }}"
+  become: true
 
 - name: Wait for dnsmasq to be ready
   wait_for:
     path: /tmp/dnsmasq.leases
-    timeout: 10
+    timeout: 60
   ignore_errors: true
