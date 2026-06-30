@@ -36,6 +36,12 @@
     -n argocd
     -f /home/{{ ansible_user }}/argocd-install.yaml
 
+- name: Set ArgoCD server to insecure mode via ConfigMap
+  ansible.builtin.command: >
+    kubectl patch configmap argocd-cmd-params-cm
+    -n argocd --type merge
+    -p='{"data":{"server.insecure":"true"}}'
+
 - name: Pin all ArgoCD deployments to control plane nodes
   ansible.builtin.command: >
     kubectl patch deployment {{ item }}
