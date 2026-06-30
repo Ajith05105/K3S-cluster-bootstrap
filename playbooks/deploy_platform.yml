@@ -3,6 +3,7 @@
   hosts: "{{ groups['server'][0] }}"
   become: true
   roles:
+    - containerd_cleanup
     - platform_configmaps
     - deploy_dnsmasq
     - deploy_ansible_runner

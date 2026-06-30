@@ -3,6 +3,7 @@
   hosts: "{{ groups['server'][0] }}"
   become: true
   roles:
+    - containerd_cleanup
     - deploy_gitea
     - deploy_argocd
     - bootstrap_gitops
