@@ -1,0 +1,73 @@
+---
+- name: Find all pods stuck in CreateContainerError or ErrImageNeverPull
+  ansible.builtin.shell: >
+    kubectl get pods -A
+    --field-selector=status.phase!=Running,status.phase!=Succeeded
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}'
+  register: broken_pods
+  changed_when: false
+
+- name: Force delete stuck pods
+  ansible.builtin.command: >
+    kubectl delete pod {{ item.split(' ')[1] }}
+    -n {{ item.split(' ')[0] }}
+    --force --grace-period=0
+  loop: "{{ broken_pods.stdout_lines }}"
+  when: broken_pods.stdout_lines | length > 0
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+
+- name: Wait for stuck pods to be deleted
+  ansible.builtin.pause:
+    seconds: 5
+  when: broken_pods.stdout_lines | length > 0
+
+- name: Restart k3s to fully clear containerd stale state
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  when: broken_pods.stdout_lines | length > 0
+
+- name: Wait for k3s to be fully back
+  ansible.builtin.command: kubectl get nodes
+  register: nodes_check
+  retries: 20
+  delay: 10
+  until: nodes_check.rc == 0
+  changed_when: false
+  when: broken_pods.stdout_lines | length > 0
+
+- name: Wait for all critical system pods to be Running
+  ansible.builtin.command: >
+    kubectl wait --for=condition=Ready pod
+    -n kube-system
+    -l k8s-app=kube-dns
+    --timeout=120s
+  when: broken_pods.stdout_lines | length > 0
+  changed_when: false
+
+- name: Re-check for any remaining broken pods
+  ansible.builtin.shell: >
+    kubectl get pods -A
+    --field-selector=status.phase!=Running,status.phase!=Succeeded
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}'
+  register: final_check
+  changed_when: false
+
+- name: Force delete any pods still broken after restart
+  ansible.builtin.command: >
+    kubectl delete pod {{ item.split(' ')[1] }}
+    -n {{ item.split(' ')[0] }}
+    --force --grace-period=0
+  loop: "{{ final_check.stdout_lines }}"
+  when: final_check.stdout_lines | length > 0
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+
+- name: Final pause for stabilization
+  ansible.builtin.pause:
+    seconds: 15
+  when: final_check.stdout_lines | length > 0
+  

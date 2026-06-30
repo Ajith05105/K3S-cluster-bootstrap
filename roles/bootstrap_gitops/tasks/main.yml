@@ -75,8 +75,8 @@
     state: directory
     mode: '0700'
 
-- name: Copy ArgoCD application manifests
-  ansible.builtin.copy:
+- name: Template ArgoCD application manifests with correct repo URL
+  ansible.builtin.template:
     src: "{{ role_path }}/../../manifests/argocd/apps/{{ item }}"
     dest: "/tmp/k8s_manifests/argocd/apps/{{ item }}"
   loop:

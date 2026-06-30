@@ -1,0 +1,34 @@
+namespace: argocd
+
+resources:
+  - ../base
+  - ingress.yml
+
+images:
+  - name: quay.io/argoproj/argocd
+    newName: gitea.cluster.local:3000/admin/argocd
+    newTag: v2.13.3
+  - name: redis
+    newName: gitea.cluster.local:3000/admin/redis
+    newTag: 7.0.15-alpine
+  - name: ghcr.io/dexidp/dex
+    newName: gitea.cluster.local:3000/admin/dex
+    newTag: v2.41.1
+
+patches:
+  - path: node-selector-deployments.yaml
+  - path: node-selector-statefulset.yaml
+  - path: insecure-configmap.yaml
+
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+  - target:
+      kind: StatefulSet
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

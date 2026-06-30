@@ -6,9 +6,9 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: http://gitea.gitea.svc.cluster.local:3000/admin/cluster-config.git
+    repoURL: http://{{ gitea_cluster_ip.stdout }}:3000/admin/cluster-config.git
     targetRevision: HEAD
-    path: manifests/dnsmasq
+    path: dnsmasq
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
@@ -16,4 +16,3 @@ spec:
     automated:
       prune: true
       selfHeal: true
-      

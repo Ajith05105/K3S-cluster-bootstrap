@@ -1,13 +1,14 @@
 ---
 
-
 - name: Download k3s artifacts to localhost
   hosts: localhost
   gather_facts: false
+  vars:
+    k3s_version: "v1.36.0+k3s1"
   tasks:
     - name: Download k3s binary
       get_url:
-        url: https://github.com/k3s-io/k3s/releases/latest/download/k3s-arm64
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-arm64"
         dest: /tmp/k3s
         mode: '0755'
 
@@ -19,7 +20,7 @@
 
     - name: Download k3s air-gap images
       get_url:
-        url: https://github.com/k3s-io/k3s/releases/latest/download/k3s-airgap-images-arm64.tar.zst
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}/k3s-airgap-images-arm64.tar.zst"
         dest: /tmp/k3s-airgap-images-arm64.tar.zst
 
 
@@ -38,4 +39,3 @@
     k3s_server_url: "{{ hostvars[groups['server'][0]]['ansible_host'] }}"
   roles:
     - k3s_server
-

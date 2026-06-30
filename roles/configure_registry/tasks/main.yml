@@ -1,0 +1,39 @@
+---
+- name: Get Gitea ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea -n gitea
+    -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  changed_when: false
+  delegate_to: "{{ groups['server'][0] }}"
+  run_once: false
+
+- name: Write k3s registries.yaml on this node
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: '0644'
+    content: |
+      mirrors:
+        "gitea.cluster.local:3000":
+          endpoint:
+            - "http://{{ gitea_cluster_ip.stdout }}:3000"
+      configs:
+        "gitea.cluster.local:3000":
+          tls:
+            insecure_skip_verify: true
+          auth:
+            username: admin
+            password: admin1234
+        "{{ gitea_cluster_ip.stdout }}:3000":
+          tls:
+            insecure_skip_verify: true
+          auth:
+            username: admin
+            password: admin1234
+  register: registries_config
+
+- name: Restart k3s/k3s-agent to apply registry config
+  ansible.builtin.systemd:
+    name: "{{ 'k3s' if inventory_hostname in groups['server'] else 'k3s-agent' }}"
+    state: restarted
+  when: registries_config.changed

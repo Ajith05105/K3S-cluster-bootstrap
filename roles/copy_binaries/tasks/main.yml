@@ -27,3 +27,10 @@
     src: /tmp/k3s-images/argocd-install.yaml
     dest: "/home/{{ ansible_user }}/argocd-install.yaml"
     mode: '0644'
+
+- name: Copy crane binary
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/crane
+    dest: /usr/local/bin/crane
+    mode: '0755'
+    

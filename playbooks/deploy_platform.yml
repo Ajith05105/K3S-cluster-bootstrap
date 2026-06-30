@@ -1,12 +1,43 @@
 ---
-- name: Deploy platform components
+- name: Deploy platform configmaps, dnsmasq, ansible-runner
   hosts: "{{ groups['server'][0] }}"
   become: true
   roles:
     - containerd_cleanup
+    - cluster_health_check
     - platform_configmaps
     - deploy_dnsmasq
     - deploy_ansible_runner
+
+- name: Deploy Gitea (bootstrap exception, imported via tarball)
+  hosts: server
+  become: true
+  tasks:
+    - name: Import Gitea image into containerd
+      ansible.builtin.command: >
+        k3s ctr images import /var/lib/rancher/k3s/agent/images/gitea.tar
+
+- name: Deploy Gitea and bootstrap GitOps
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
     - deploy_gitea
+
+- name: Configure all nodes to trust Gitea as a registry
+  hosts: all
+  become: true
+  roles:
+    - configure_registry
+
+- name: Push ArgoCD images into Gitea registry
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
+    - push_argocd_images_to_gitea
+
+- name: Deploy ArgoCD via Kustomize, pulling from Gitea
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
     - deploy_argocd
     - bootstrap_gitops

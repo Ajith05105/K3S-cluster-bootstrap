@@ -1,3 +1,4 @@
+---
 - name: Preflight — pull and build all container images
   hosts: localhost
   gather_facts: true
@@ -122,9 +123,14 @@
         podman pull --platform linux/arm64 quay.io/argoproj/argocd:v2.13.3
       when: not argocd_tar.stat.exists
 
+    - name: Re-tag argocd image to strip embedded registry reference
+      ansible.builtin.command: >
+        podman tag quay.io/argoproj/argocd:v2.13.3 localhost/argocd:v2.13.3
+      when: not argocd_tar.stat.exists
+
     - name: Save argocd image
       ansible.builtin.command: >
-        podman save quay.io/argoproj/argocd:v2.13.3
+        podman save localhost/argocd:v2.13.3
         -o /tmp/k3s-images/argocd.tar
       when: not argocd_tar.stat.exists
 
@@ -133,9 +139,14 @@
         podman pull --platform linux/arm64 public.ecr.aws/docker/library/redis:7.0.15-alpine
       when: not redis_tar.stat.exists
 
+    - name: Re-tag redis image to strip embedded registry reference
+      ansible.builtin.command: >
+        podman tag public.ecr.aws/docker/library/redis:7.0.15-alpine localhost/redis:7.0.15-alpine
+      when: not redis_tar.stat.exists
+
     - name: Save redis image
       ansible.builtin.command: >
-        podman save public.ecr.aws/docker/library/redis:7.0.15-alpine
+        podman save localhost/redis:7.0.15-alpine
         -o /tmp/k3s-images/redis.tar
       when: not redis_tar.stat.exists
 
@@ -144,9 +155,14 @@
         podman pull --platform linux/arm64 ghcr.io/dexidp/dex:v2.41.1
       when: not dex_tar.stat.exists
 
+    - name: Re-tag dex image to strip embedded registry reference
+      ansible.builtin.command: >
+        podman tag ghcr.io/dexidp/dex:v2.41.1 localhost/dex:v2.41.1
+      when: not dex_tar.stat.exists
+
     - name: Save dex image
       ansible.builtin.command: >
-        podman save ghcr.io/dexidp/dex:v2.41.1
+        podman save localhost/dex:v2.41.1
         -o /tmp/k3s-images/dex.tar
       when: not dex_tar.stat.exists
 
@@ -156,6 +172,33 @@
         dest: /tmp/k3s-images/argocd-install.yaml
         mode: '0644'
 
+    - name: Check if crane binary exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/crane"
+      register: crane_binary
+
+    - name: Download crane binary for ARM64
+      ansible.builtin.get_url:
+        url: https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_arm64.tar.gz
+        dest: /tmp/k3s-images/crane.tar.gz
+        mode: '0644'
+      when: not crane_binary.stat.exists
+
+    - name: Extract crane binary
+      ansible.builtin.unarchive:
+        src: /tmp/k3s-images/crane.tar.gz
+        dest: /tmp/k3s-images/
+        remote_src: true
+        include:
+          - crane
+      when: not crane_binary.stat.exists
+
+    - name: Set crane binary as executable
+      ansible.builtin.file:
+        path: /tmp/k3s-images/crane
+        mode: '0755'
+      when: not crane_binary.stat.exists
+
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
       changed_when: false
@@ -163,3 +206,4 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+        
