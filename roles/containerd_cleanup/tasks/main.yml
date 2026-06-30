@@ -1,0 +1,24 @@
+---
+- name: List all containerd containers
+  ansible.builtin.command: k3s ctr containers list -q
+  register: ctr_containers
+  changed_when: false
+
+- name: List all running k3s pods
+  ansible.builtin.command: >
+    kubectl get pods -A
+    -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'
+  register: running_pod_uids
+  changed_when: false
+
+- name: Prune containerd tasks in unknown/stopped state
+  ansible.builtin.shell: |
+    for c in $(k3s ctr containers list -q); do
+      status=$(k3s ctr tasks list 2>/dev/null | grep "^$c " | awk '{print $3}')
+      if [ "$status" == "STOPPED" ] || [ -z "$status" ]; then
+        k3s ctr tasks delete --force "$c" 2>/dev/null
+        k3s ctr containers delete "$c" 2>/dev/null
+      fi
+    done
+  changed_when: false
+  failed_when: false
