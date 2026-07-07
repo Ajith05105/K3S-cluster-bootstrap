@@ -24,7 +24,6 @@ vault_password.txt
 # Ansible Galaxy roles (installed, not authored)
 roles/requirements/
 galaxy_roles/
-roles/*/  # downloaded galaxy roles
 
 # SSH keys
 *.pem

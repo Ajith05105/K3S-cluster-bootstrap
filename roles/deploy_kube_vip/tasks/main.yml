@@ -5,24 +5,17 @@
     dest: "/home/{{ ansible_user }}/kube-vip.tar"
     mode: '0644'
 
-- name: Copy kube-vip RBAC manifest to server
-  ansible.builtin.copy:
-    src: /tmp/k3s-images/kube-vip-rbac.yaml
-    dest: "/home/{{ ansible_user }}/kube-vip-rbac.yaml"
-    mode: '0644'
-
-- name: Create K3s manifests directory
+- name: Ensure K3s manifests directory exists
   ansible.builtin.file:
     path: /var/lib/rancher/k3s/server/manifests
     state: directory
     mode: '0755'
 
-- name: Place kube-vip RBAC manifest in K3s auto-deploy directory
+- name: Copy kube-vip RBAC manifest to K3s auto-deploy directory
   ansible.builtin.copy:
-    src: "/home/{{ ansible_user }}/kube-vip-rbac.yaml"
+    src: kube-vip-rbac.yaml
     dest: /var/lib/rancher/k3s/server/manifests/kube-vip-rbac.yaml
     mode: '0644'
-    remote_src: true
 
 - name: Import kube-vip image into containerd k8s.io namespace
   ansible.builtin.command: >
@@ -30,24 +23,9 @@
     --namespace k8s.io
     images import /home/{{ ansible_user }}/kube-vip.tar
 
-- name: Generate kube-vip DaemonSet manifest
-  ansible.builtin.shell: >
-    k3s ctr run --rm --net-host
-    ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
-    vip /kube-vip manifest daemonset
-    --interface {{ kube_vip_interface }}
-    --address {{ kube_vip_vip }}
-    --inCluster
-    --taint
-    --controlplane
-    --services
-    --arp
-    --leaderElection
-  register: kube_vip_manifest
-
-- name: Place kube-vip DaemonSet manifest in K3s auto-deploy directory
+- name: Copy kube-vip DaemonSet manifest to K3s auto-deploy directory
   ansible.builtin.copy:
-    content: "{{ kube_vip_manifest.stdout }}"
+    src: kube-vip-daemonset.yaml
     dest: /var/lib/rancher/k3s/server/manifests/kube-vip.yaml
     mode: '0644'
 
@@ -70,3 +48,4 @@
   become: true
   changed_when: false
   ignore_errors: true
+  

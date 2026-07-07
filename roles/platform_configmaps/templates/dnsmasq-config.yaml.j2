@@ -13,5 +13,5 @@ data:
     dhcp-authoritative
     log-dhcp
 {% for host in groups['server'] %}
-    dhcp-host={{ hostvars[host]['mac_address'] }},ignore
+    dhcp-host={{ hostvars[host]['mac_address'] }},{{ hostvars[host]['ansible_host'] }},infinite
 {% endfor %}

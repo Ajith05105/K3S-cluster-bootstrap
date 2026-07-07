@@ -102,12 +102,58 @@
         podman save ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
         -o /tmp/k3s-images/kube-vip.tar
       when: not kubevip_tar.stat.exists
-    
-    - name: Download kube-vip RBAC manifest
+
+    - name: Check if kube-vip DaemonSet manifest is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
+      register: vendored_daemonset
+
+    - name: Check if kube-vip RBAC manifest is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-rbac.yaml"
+      register: vendored_rbac
+
+    - name: Ensure deploy_kube_vip files directory exists
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files"
+        state: directory
+        mode: '0755'
+      when: not vendored_daemonset.stat.exists or not vendored_rbac.stat.exists
+
+    - name: Load kube-vip image from tar (for manifest generation)
+      ansible.builtin.command: >
+        podman load -i /tmp/k3s-images/kube-vip.tar
+      when: not vendored_daemonset.stat.exists
+
+    - name: Generate kube-vip DaemonSet manifest (one-time — reuses already-downloaded image, no extra network)
+      ansible.builtin.command: >
+        podman run --rm --platform linux/arm64
+        ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+        manifest daemonset
+        --interface {{ kube_vip_interface }}
+        --address {{ kube_vip_vip }}
+        --inCluster
+        --taint
+        --controlplane
+        --services
+        --arp
+        --leaderElection
+      register: generated_daemonset
+      when: not vendored_daemonset.stat.exists
+
+    - name: Save generated DaemonSet manifest into the repo
+      ansible.builtin.copy:
+        content: "{{ generated_daemonset.stdout }}"
+        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
+        mode: '0644'
+      when: not vendored_daemonset.stat.exists
+
+    - name: Fetch kube-vip RBAC manifest (one-time)
       ansible.builtin.get_url:
         url: https://kube-vip.io/manifests/rbac.yaml
-        dest: /tmp/k3s-images/kube-vip-rbac.yaml
+        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-rbac.yaml"
         mode: '0644'
+      when: not vendored_rbac.stat.exists
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
@@ -116,4 +162,3 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
-
