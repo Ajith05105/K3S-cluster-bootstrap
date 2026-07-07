@@ -8,7 +8,10 @@
   shell: >
     INSTALL_K3S_SKIP_DOWNLOAD=true
     K3S_TOKEN={{ k3s_token }}
-    {{ k3s_install_script_dest }} server --cluster-init
+    {{ k3s_install_script_dest }} server
+    --cluster-init
+    --tls-san {{ kube_vip_vip }}
+    --disable servicelb
   when:
     - not k3s_service.stat.exists
     - k3s_cluster_init | bool
@@ -19,12 +22,24 @@
     timeout: 120
   when: k3s_cluster_init | bool
 
+- name: Wait for API server to be fully ready
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:6443/healthz"
+    validate_certs: false
+    status_code: [200, 401]
+  register: api_ready
+  retries: 30
+  delay: 10
+  until: api_ready.status in [200, 401]
+  when: k3s_cluster_init | bool  
+
 - name: Install k3s server (joining existing cluster)
   shell: >
     INSTALL_K3S_SKIP_DOWNLOAD=true
     K3S_TOKEN={{ k3s_token }}
+    K3S_URL=https://{{ k3s_server_url }}:6443
     {{ k3s_install_script_dest }} server
-    --server https://{{ k3s_server_url }}:6443
+    --tls-san {{ kube_vip_vip }}
   when:
     - not k3s_service.stat.exists
     - not (k3s_cluster_init | bool)

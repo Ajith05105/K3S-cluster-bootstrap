@@ -85,7 +85,29 @@
         podman save localhost/ansible-runner:latest
         -o /tmp/k3s-images/ansible-runner.tar
       when: not runner_tar.stat.exists
+    
+    - name: Check if kube-vip tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/kube-vip.tar"
+      register: kubevip_tar
 
+    - name: Pull kube-vip image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+      when: not kubevip_tar.stat.exists
+    
+    - name: Save kube-vip image
+      ansible.builtin.command: >
+        podman save ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+        -o /tmp/k3s-images/kube-vip.tar
+      when: not kubevip_tar.stat.exists
+    
+    - name: Download kube-vip RBAC manifest
+      ansible.builtin.get_url:
+        url: https://kube-vip.io/manifests/rbac.yaml
+        dest: /tmp/k3s-images/kube-vip-rbac.yaml
+        mode: '0644'
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop

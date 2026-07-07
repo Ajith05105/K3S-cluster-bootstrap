@@ -39,3 +39,24 @@
   roles:
     - k3s_server
 
+- name: Copy and import kube-vip image on all server nodes
+  hosts: server
+  become: true
+  tasks:
+    - name: Copy kube-vip image tar to server
+      ansible.builtin.copy:
+        src: /tmp/k3s-images/kube-vip.tar
+        dest: "/home/{{ ansible_user }}/kube-vip.tar"
+        mode: '0644'
+
+    - name: Import kube-vip image into containerd
+      ansible.builtin.command: >
+        k3s ctr images import /home/{{ ansible_user }}/kube-vip.tar
+
+- name: Deploy kube-vip
+  hosts: server
+  become: true
+  run_once: true
+  roles:
+    - deploy_kube_vip
+    
