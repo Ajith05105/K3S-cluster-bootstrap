@@ -181,7 +181,7 @@
     - name: Fetch kube-vip-cloud-provider manifest (one-time) — this is what actually assigns LoadBalancer IPs to Services
       ansible.builtin.get_url:
         url: https://raw.githubusercontent.com/kube-vip/kube-vip-cloud-provider/main/manifest/kube-vip-cloud-controller.yaml
-        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-cloud-controller.yaml"
+        dest: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-cloud-controller.yaml"
         mode: '0644'
       when: not vendored_cloud_provider.stat.exists
 
