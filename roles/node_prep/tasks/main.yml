@@ -25,7 +25,7 @@
               - {{ ansible_host }}/24
             routes:
               - to: default
-                via: {{bootstrap_interface_ip}}
+                via: {{gateway_ip}}
         
 
 - name: Remove cloud-init netplan config
