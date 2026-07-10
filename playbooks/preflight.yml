@@ -103,6 +103,23 @@
         -o /tmp/k3s-images/kube-vip.tar
       when: not kubevip_tar.stat.exists
 
+    - name: Check if kube-vip-cloud-provider tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/kube-vip-cloud-provider.tar"
+      register: cloud_provider_tar
+
+    - name: Pull kube-vip-cloud-provider image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        ghcr.io/kube-vip/kube-vip-cloud-provider:v0.0.12
+      when: not cloud_provider_tar.stat.exists
+
+    - name: Save kube-vip-cloud-provider image
+      ansible.builtin.command: >
+        podman save ghcr.io/kube-vip/kube-vip-cloud-provider:v0.0.12
+        -o /tmp/k3s-images/kube-vip-cloud-provider.tar
+      when: not cloud_provider_tar.stat.exists
+
     - name: Check if kube-vip DaemonSet manifest is already vendored
       ansible.builtin.stat:
         path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
@@ -155,6 +172,18 @@
         dest: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-rbac.yaml"
         mode: '0644'
       when: not vendored_rbac.stat.exists
+
+    - name: Check if kube-vip-cloud-provider manifest is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-cloud-controller.yaml"
+      register: vendored_cloud_provider
+
+    - name: Fetch kube-vip-cloud-provider manifest (one-time) — this is what actually assigns LoadBalancer IPs to Services
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/kube-vip/kube-vip-cloud-provider/main/manifest/kube-vip-cloud-controller.yaml
+        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-cloud-controller.yaml"
+        mode: '0644'
+      when: not vendored_cloud_provider.stat.exists
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop

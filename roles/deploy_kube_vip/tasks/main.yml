@@ -48,4 +48,41 @@
   become: true
   changed_when: false
   ignore_errors: true
-  
+
+# --- LoadBalancer support for Services (e.g. Traefik) ---
+# kube-vip's DaemonSet above only handles the control-plane VIP. Actually
+# watching Service objects of type LoadBalancer and assigning them an IP
+# is a separate component, kube-vip-cloud-provider. Since --disable servicelb
+# turns off k3s's own built-in LB controller, without this, every
+# LoadBalancer Service sits at EXTERNAL-IP <pending> forever.
+
+- name: Copy kube-vip-cloud-provider manifest to K3s auto-deploy directory
+  ansible.builtin.copy:
+    src: kube-vip-cloud-controller.yaml
+    dest: /var/lib/rancher/k3s/server/manifests/kube-vip-cloud-controller.yaml
+    mode: '0644'
+
+- name: Generate and place kube-vip LoadBalancer IP range ConfigMap
+  ansible.builtin.template:
+    src: kubevip-range-configmap.yaml.j2
+    dest: /var/lib/rancher/k3s/server/manifests/kubevip-range-configmap.yaml
+    mode: '0644'
+
+- name: Wait for kube-vip-cloud-provider deployment to exist
+  ansible.builtin.command: >
+    kubectl get deployment kube-vip-cloud-provider -n kube-system
+  become: true
+  register: cloud_provider_deploy_check
+  until: cloud_provider_deploy_check.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: Wait for kube-vip-cloud-provider to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/kube-vip-cloud-provider -n kube-system
+    --timeout=120s
+  become: true
+  changed_when: false
+  ignore_errors: true

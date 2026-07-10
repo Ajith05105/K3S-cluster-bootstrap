@@ -53,10 +53,19 @@
       ansible.builtin.command: >
         k3s ctr images import /home/{{ ansible_user }}/kube-vip.tar
 
+    - name: Copy kube-vip-cloud-provider image tar to server
+      ansible.builtin.copy:
+        src: /tmp/k3s-images/kube-vip-cloud-provider.tar
+        dest: "/home/{{ ansible_user }}/kube-vip-cloud-provider.tar"
+        mode: '0644'
+
+    - name: Import kube-vip-cloud-provider image into containerd
+      ansible.builtin.command: >
+        k3s ctr --namespace k8s.io images import /home/{{ ansible_user }}/kube-vip-cloud-provider.tar
+
 - name: Deploy kube-vip
   hosts: server
   become: true
   run_once: true
   roles:
     - deploy_kube_vip
-    
