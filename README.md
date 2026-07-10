@@ -80,7 +80,7 @@ ansible_runner_public_key: ~/.ssh/ansible_runner_key.pub
 k3s_token: <any-long-random-string>
 
 bootstrap_interface: enxa0cec892dc0f   # your USB ethernet adapter — check with: ip a
-bootstrap_interface_ip: 192.168.1.100  # IP to assign your laptop on that interface
+gateway_ip: 192.168.1.1  # IP to assign your laptop on that interface
 dhcp_range_start: 192.168.1.200
 dhcp_range_end: 192.168.1.254
 subnet_mask: 255.255.255.0

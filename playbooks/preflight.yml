@@ -105,20 +105,21 @@
 
     - name: Check if kube-vip DaemonSet manifest is already vendored
       ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
       register: vendored_daemonset
 
     - name: Check if kube-vip RBAC manifest is already vendored
       ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-rbac.yaml"
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-rbac.yaml"
       register: vendored_rbac
 
-    - name: Ensure deploy_kube_vip files directory exists
+    - name: Ensure manifest files directory exists
       ansible.builtin.file:
-        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files"
+        path: "{{ playbook_dir }}/../manifests/kube-vip/"
         state: directory
         mode: '0755'
       when: not vendored_daemonset.stat.exists or not vendored_rbac.stat.exists
+
 
     - name: Load kube-vip image from tar (for manifest generation)
       ansible.builtin.command: >
@@ -144,14 +145,14 @@
     - name: Save generated DaemonSet manifest into the repo
       ansible.builtin.copy:
         content: "{{ generated_daemonset.stdout }}"
-        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
+        dest: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
         mode: '0644'
       when: not vendored_daemonset.stat.exists
 
     - name: Fetch kube-vip RBAC manifest (one-time)
       ansible.builtin.get_url:
         url: https://kube-vip.io/manifests/rbac.yaml
-        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-rbac.yaml"
+        dest: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-rbac.yaml"
         mode: '0644'
       when: not vendored_rbac.stat.exists
 
