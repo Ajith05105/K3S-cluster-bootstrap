@@ -40,3 +40,18 @@
     src: /tmp/k3s-images/ansible-runner.tar
     dest: "{{ k3s_airgap_images_dir }}/ansible-runner.tar"
     mode: '0644'
+
+
+- name: Copy gitea image tar to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/gitea.tar
+    dest: "{{ k3s_airgap_images_dir }}/gitea.tar"
+    mode: '0644'
+
+
+- name: Copy helm binary to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/helm
+    dest: /usr/local/bin/helm
+    mode: '0755'
+  become: true

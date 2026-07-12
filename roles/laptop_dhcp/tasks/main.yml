@@ -8,11 +8,27 @@
 - name: Load platform variables
   include_vars: "{{ ansible_facts['os_family'] | lower }}.yml"
 
-- name: Install dnsmasq
+- name: Check if dnsmasq is installed (Darwin)
+  ansible.builtin.command: brew list --formula dnsmasq
+  register: dnsmasq_brew_installed
+  changed_when: false
+  failed_when: false
+  become: false
+  when: ansible_facts['os_family'] == 'Darwin'
+
+- name: Install dnsmasq (Darwin)
+  ansible.builtin.command: brew install dnsmasq
+  become: false
+  when:
+    - ansible_facts['os_family'] == 'Darwin'
+    - dnsmasq_brew_installed.rc != 0
+
+- name: Install dnsmasq (non-Darwin)
   package:
     name: dnsmasq
     state: present
   become: false
+  when: ansible_facts['os_family'] != 'Darwin'
 
 - name: Write dnsmasq config
   template:
@@ -20,15 +36,14 @@
     dest: "{{ dnsmasq_conf_path }}"
   notify: restart dnsmasq
 
+- name: Flush handlers to apply dnsmasq restart
+  meta: flush_handlers
+
 - name: Check if dnsmasq is running
   command: pgrep dnsmasq
   register: dnsmasq_running
   changed_when: false
   failed_when: false
-
-- name: Restart dnsmasq
-  command: "{{ dnsmasq_restart_cmd }}"
-  become: true
 
 - name: Wait for dnsmasq to be ready
   wait_for:

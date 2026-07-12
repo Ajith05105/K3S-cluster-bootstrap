@@ -3,6 +3,32 @@
   gather_facts: true
   tasks:
 
+    - name: Check if helm binary is already staged
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/helm"
+      register: helm_binary_staged
+
+    - name: Download and extract Helm binary (arm64)
+      ansible.builtin.unarchive:
+        src: "https://get.helm.sh/helm-{{ helm_version }}-linux-arm64.tar.gz"
+        dest: /tmp/k3s-images/
+        remote_src: true
+      environment: >-
+        {{
+        {'PATH': '/opt/homebrew/opt/gnu-tar/libexec/gnubin:' + ansible_env.PATH}
+        if ansible_facts['os_family'] == 'Darwin'
+        else {}
+        }}
+      when: not helm_binary_staged.stat.exists
+
+    - name: Move helm binary to expected flat path
+      ansible.builtin.copy:
+        src: "/tmp/k3s-images/linux-arm64/helm"
+        dest: "/tmp/k3s-images/helm"
+        mode: '0755'
+        remote_src: true
+      when: not helm_binary_staged.stat.exists
+
     - name: Create image staging directory
       ansible.builtin.file:
         path: /tmp/k3s-images
@@ -24,6 +50,32 @@
         path: "/tmp/k3s-images/ansible-runner.tar"
       register: runner_tar
 
+    - name: Check if kube-vip tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/kube-vip.tar"
+      register: kubevip_tar
+
+    - name: Check if kube-vip-cloud-provider tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/kube-vip-cloud-provider.tar"
+      register: cloud_provider_tar
+
+    - name: Check if kube-vip DaemonSet manifest is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
+      register: vendored_daemonset
+
+    - name: Check if kube-vip RBAC manifest is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-rbac.yaml"
+      register: vendored_rbac
+
+    # Skip re-pulling/rebuilding gitea image if already staged from a previous run
+    - name: Check if gitea image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/gitea.tar"
+      register: gitea_tar
+
     - name: Install QEMU for cross-platform builds (Linux only)
       ansible.builtin.apt:
         name:
@@ -41,11 +93,13 @@
 
     - name: Start Podman machine
       ansible.builtin.command: podman machine start
-      failed_when: false 
+      failed_when: false
       changed_when: false
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+          or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
+          or not gitea_tar.stat.exists
 
     - name: Pull dnsmasq image for arm64
       ansible.builtin.command: >
@@ -85,28 +139,18 @@
         podman save localhost/ansible-runner:latest
         -o /tmp/k3s-images/ansible-runner.tar
       when: not runner_tar.stat.exists
-    
-    - name: Check if kube-vip tar exists
-      ansible.builtin.stat:
-        path: "/tmp/k3s-images/kube-vip.tar"
-      register: kubevip_tar
 
     - name: Pull kube-vip image for arm64
       ansible.builtin.command: >
         podman pull --platform linux/arm64
         ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
       when: not kubevip_tar.stat.exists
-    
+
     - name: Save kube-vip image
       ansible.builtin.command: >
         podman save ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
         -o /tmp/k3s-images/kube-vip.tar
       when: not kubevip_tar.stat.exists
-
-    - name: Check if kube-vip-cloud-provider tar exists
-      ansible.builtin.stat:
-        path: "/tmp/k3s-images/kube-vip-cloud-provider.tar"
-      register: cloud_provider_tar
 
     - name: Pull kube-vip-cloud-provider image for arm64
       ansible.builtin.command: >
@@ -120,23 +164,12 @@
         -o /tmp/k3s-images/kube-vip-cloud-provider.tar
       when: not cloud_provider_tar.stat.exists
 
-    - name: Check if kube-vip DaemonSet manifest is already vendored
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
-      register: vendored_daemonset
-
-    - name: Check if kube-vip RBAC manifest is already vendored
-      ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-rbac.yaml"
-      register: vendored_rbac
-
     - name: Ensure manifest files directory exists
       ansible.builtin.file:
         path: "{{ playbook_dir }}/../manifests/kube-vip/"
         state: directory
         mode: '0755'
       when: not vendored_daemonset.stat.exists or not vendored_rbac.stat.exists
-
 
     - name: Load kube-vip image from tar (for manifest generation)
       ansible.builtin.command: >
@@ -175,7 +208,7 @@
 
     - name: Check if kube-vip-cloud-provider manifest is already vendored
       ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-cloud-controller.yaml"
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-cloud-controller.yaml"
       register: vendored_cloud_provider
 
     - name: Fetch kube-vip-cloud-provider manifest (one-time) — this is what actually assigns LoadBalancer IPs to Services
@@ -185,6 +218,38 @@
         mode: '0644'
       when: not vendored_cloud_provider.stat.exists
 
+    - name: Patch kube-vip-cloud-provider manifest for airgapped compatibility (imagePullPolicy Always -> IfNotPresent)
+      ansible.builtin.replace:
+        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-cloud-controller.yaml"
+        regexp: 'imagePullPolicy: Always'
+        replace: 'imagePullPolicy: IfNotPresent'
+
+    - name: Pull gitea image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        docker.gitea.com/gitea:{{ gitea_version }}-rootless
+      when: not gitea_tar.stat.exists
+
+    - name: Save gitea image
+      ansible.builtin.command: >
+        podman save docker.gitea.com/gitea:{{ gitea_version }}-rootless
+        -o /tmp/k3s-images/gitea.tar
+      when: not gitea_tar.stat.exists
+
+    # Helm chart is vendored into the role so cluster bootstrap works offline, without a Helm repo add
+    - name: Check if gitea chart is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../manifests/gitea/gitea/Chart.yaml"
+      register: vendored_gitea_chart
+
+    - name: Pull and unpack the Gitea Helm chart
+      ansible.builtin.command: >
+        helm pull oci://docker.gitea.com/charts/gitea
+        --untar
+        --untardir {{ playbook_dir }}/../manifests/gitea
+        --version {{ gitea_chart_version }}
+      when: not vendored_gitea_chart.stat.exists
+
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
       changed_when: false
@@ -192,3 +257,5 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+          or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
+          or not gitea_tar.stat.exists

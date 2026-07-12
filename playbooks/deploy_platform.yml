@@ -6,3 +6,5 @@
     - platform_configmaps
     - deploy_dnsmasq
     - deploy_ansible_runner
+    - deploy_gitea
+    

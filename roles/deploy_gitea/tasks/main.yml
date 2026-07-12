@@ -1,0 +1,63 @@
+- name: Copy vendored Gitea chart to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/gitea/gitea/"
+    dest: "/home/{{ ansible_user }}/gitea-chart"
+    mode: '0755'
+
+- name: Copy Gitea values file to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/gitea/values.yaml"
+    dest: "/home/{{ ansible_user }}/gitea-values.yaml"
+    mode: '0644'
+
+- name: Check if gitea namespace exists
+  ansible.builtin.command: >
+    kubectl get namespace gitea --ignore-not-found
+  register: gitea_namespace_check
+  changed_when: false
+
+- name: Create gitea namespace
+  ansible.builtin.command: kubectl create namespace gitea
+  when: gitea_namespace_check.stdout == ""
+
+- name: Generate Gitea admin Secret manifest
+  ansible.builtin.template:
+    src: gitea-admin-secret.yaml.j2
+    dest: "/home/{{ ansible_user }}/gitea-admin-secret.yaml"
+    mode: '0600'
+  register: gitea_secret_manifest
+  no_log: true
+
+- name: Apply Gitea admin Secret
+  ansible.builtin.command: >
+    kubectl apply -f /home/{{ ansible_user }}/gitea-admin-secret.yaml
+  when: gitea_secret_manifest.changed
+  register: gitea_secret_result
+  changed_when: "'configured' in gitea_secret_result.stdout or 'created' in gitea_secret_result.stdout"
+
+- name: Check if Gitea deployment exists
+  ansible.builtin.command: >
+    kubectl get deployment gitea -n gitea
+  register: gitea_deployment_check
+  failed_when: false
+  changed_when: false
+
+- name: Restart Gitea to apply updated admin credentials
+  ansible.builtin.command: >
+    kubectl rollout restart deployment/gitea -n gitea
+  when:
+    - gitea_secret_result.changed
+    - gitea_deployment_check.rc == 0
+
+
+
+- name: Install or upgrade Gitea via Helm
+  ansible.builtin.command: >
+    helm upgrade --install gitea /home/{{ ansible_user }}/gitea-chart
+    --namespace gitea
+    -f /home/{{ ansible_user }}/gitea-values.yaml
+    --set image.tag={{ gitea_version }}
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  
