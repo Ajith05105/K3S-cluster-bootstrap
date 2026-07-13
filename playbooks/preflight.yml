@@ -250,6 +250,19 @@
         --version {{ gitea_chart_version }}
       when: not vendored_gitea_chart.stat.exists
 
+    - name: Check if argocd chart is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../manifests/argocd/argo-cd/Chart.yaml"
+      register: vendored_argocd_chart
+
+    - name: Pull and unpack the ArgoCD Helm chart
+      ansible.builtin.command: >
+        helm pull argo-cd
+        --repo https://argoproj.github.io/argo-helm
+        --version {{ argocd_chart_version }}
+        --untar
+        --untardir {{ playbook_dir }}/../manifests/argocd
+
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
       changed_when: false
