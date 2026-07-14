@@ -1,0 +1,47 @@
+---
+- name: Get Gitea's in-cluster ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea-http -n gitea -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  changed_when: false
+
+- name: Authenticate crane against the Gitea registry
+  ansible.builtin.command: >
+    crane auth login {{ gitea_cluster_ip.stdout }}:3000
+    -u {{ gitea_admin_username }}
+    -p {{ gitea_admin_password }}
+  no_log: true
+  changed_when: false
+
+- name: Push argocd image to Gitea registry via crane
+  ansible.builtin.command: >
+    crane push /var/lib/rancher/k3s/agent/images/argocd.tar
+    {{ gitea_cluster_ip.stdout }}:3000/admin/argocd:{{ argocd_version }}
+    --insecure
+  register: crane_push_argocd
+  until: crane_push_argocd.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: true
+
+- name: Push redis image to Gitea registry via crane
+  ansible.builtin.command: >
+    crane push /var/lib/rancher/k3s/agent/images/redis.tar
+    {{ gitea_cluster_ip.stdout }}:3000/admin/redis:8.2.3-alpine
+    --insecure
+  register: crane_push_redis
+  until: crane_push_redis.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: true
+
+- name: Push dex image to Gitea registry via crane
+  ansible.builtin.command: >
+    crane push /var/lib/rancher/k3s/agent/images/dex.tar
+    {{ gitea_cluster_ip.stdout }}:3000/admin/dex:v2.45.1
+    --insecure
+  register: crane_push_dex
+  until: crane_push_dex.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: true

@@ -1,0 +1,23 @@
+---
+- name: Copy vendored ArgoCD chart to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/argocd/argo-cd/"
+    dest: "/home/{{ ansible_user }}/argocd-chart"
+    mode: '0755'
+
+- name: Copy ArgoCD values file to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/argocd/values.yaml"
+    dest: "/home/{{ ansible_user }}/argocd-values.yaml"
+    mode: '0644'
+
+- name: Install or upgrade ArgoCD via Helm
+  ansible.builtin.command: >
+    helm upgrade --install argocd /home/{{ ansible_user }}/argocd-chart
+    --namespace {{ argocd_namespace }}
+    --create-namespace
+    -f /home/{{ ansible_user }}/argocd-values.yaml
+    --set global.image.tag={{ argocd_version }}
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
