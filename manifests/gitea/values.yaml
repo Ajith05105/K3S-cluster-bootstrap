@@ -113,7 +113,7 @@ service:
   http:
     type: ClusterIP
     port: 3000
-    clusterIP: None
+    clusterIP: ""
     loadBalancerIP:
     nodePort:
     externalTrafficPolicy:
@@ -169,7 +169,7 @@ ingress:
   pathType: Prefix
   annotations: {}
   hosts:
-    - host: gitea.lab
+    - host: gitea.cluster.local
       paths:
         - path: /
   tls: []
@@ -455,8 +455,8 @@ gitea:
     server:
       SSH_PORT: 22 # rootful image
       SSH_LISTEN_PORT: 2222 # rootless image
-      DOMAIN: gitea.lab
-      ROOT_URL: "http://gitea.lab/"
+      DOMAIN: gitea.cluster.local
+      ROOT_URL: "http://gitea.cluster.local/"
       OFFLINE_MODE: true
 
     database:

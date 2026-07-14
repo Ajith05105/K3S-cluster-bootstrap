@@ -8,6 +8,12 @@
         path: "/tmp/k3s-images/helm"
       register: helm_binary_staged
 
+    - name: Create image staging directory
+      ansible.builtin.file:
+        path: /tmp/k3s-images
+        state: directory
+        mode: '0755'
+
     - name: Download and extract Helm binary (arm64)
       ansible.builtin.unarchive:
         src: "https://get.helm.sh/helm-{{ helm_version }}-linux-arm64.tar.gz"
@@ -28,12 +34,6 @@
         mode: '0755'
         remote_src: true
       when: not helm_binary_staged.stat.exists
-
-    - name: Create image staging directory
-      ansible.builtin.file:
-        path: /tmp/k3s-images
-        state: directory
-        mode: '0755'
 
     - name: Check if dnsmasq tar exists
       ansible.builtin.stat:
@@ -262,6 +262,92 @@
         --version {{ argocd_chart_version }}
         --untar
         --untardir {{ playbook_dir }}/../manifests/argocd
+      when: not vendored_argocd_chart.stat.exists
+
+    - name: Check if argocd image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/argocd.tar"
+      register: argocd_tar
+
+    - name: Check if redis image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/redis.tar"
+      register: redis_tar
+
+    - name: Check if dex image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/dex.tar"
+      register: dex_tar
+
+    - name: Check if crane binary is already staged
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/crane"
+      register: crane_binary_staged
+
+    - name: Get latest crane release version
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/google/go-containerregistry/releases/latest
+        return_content: true
+      register: crane_release
+      when: not crane_binary_staged.stat.exists
+
+    - name: Ensure crane extraction directory exists
+      ansible.builtin.file:
+        path: /tmp/k3s-images/crane-extract
+        state: directory
+        mode: '0755'
+      when: not crane_binary_staged.stat.exists
+
+    - name: Download and extract crane binary (arm64)
+      ansible.builtin.unarchive:
+        src: "https://github.com/google/go-containerregistry/releases/download/{{ crane_release.json.tag_name }}/go-containerregistry_Linux_arm64.tar.gz"
+        dest: /tmp/k3s-images/crane-extract/
+        remote_src: true
+      when: not crane_binary_staged.stat.exists
+
+    - name: Move crane binary to expected flat path
+      ansible.builtin.copy:
+        src: /tmp/k3s-images/crane-extract/crane
+        dest: /tmp/k3s-images/crane
+        mode: '0755'
+        remote_src: true
+      when: not crane_binary_staged.stat.exists
+
+    - name: Pull argocd image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        quay.io/argoproj/argocd:{{ argocd_version }}
+      when: not argocd_tar.stat.exists
+
+    - name: Save argocd image
+      ansible.builtin.command: >
+        podman save quay.io/argoproj/argocd:{{ argocd_version }}
+        -o /tmp/k3s-images/argocd.tar
+      when: not argocd_tar.stat.exists
+
+    - name: Pull redis image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        public.ecr.aws/docker/library/redis:8.2.3-alpine
+      when: not redis_tar.stat.exists
+
+    - name: Save redis image
+      ansible.builtin.command: >
+        podman save public.ecr.aws/docker/library/redis:8.2.3-alpine
+        -o /tmp/k3s-images/redis.tar
+      when: not redis_tar.stat.exists
+
+    - name: Pull dex image for arm64
+      ansible.builtin.command: >
+        podman pull --platform linux/arm64
+        ghcr.io/dexidp/dex:v2.45.1
+      when: not dex_tar.stat.exists
+
+    - name: Save dex image
+      ansible.builtin.command: >
+        podman save ghcr.io/dexidp/dex:v2.45.1
+        -o /tmp/k3s-images/dex.tar
+      when: not dex_tar.stat.exists
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop

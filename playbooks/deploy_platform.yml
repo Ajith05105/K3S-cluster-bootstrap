@@ -7,4 +7,17 @@
     - deploy_dnsmasq
     - deploy_ansible_runner
     - deploy_gitea
-    
+
+- name: Configure container registry mirror on all nodes
+  hosts: server
+  become: true
+  serial: 1
+  roles:
+    - configure_registry
+
+- name: Push ArgoCD images and deploy ArgoCD
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
+    - push_argocd_images_to_gitea
+    - deploy_argocd
