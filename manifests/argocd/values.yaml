@@ -1,5 +1,7 @@
 global:
   domain: argocd.cluster.local
+  imagePullSecrets:
+    - name: gitea-registry-pull
   image:
     repository: gitea.cluster.local:3000/admin/argocd
   nodeSelector:

@@ -1,4 +1,35 @@
 ---
+- name: Ensure argocd namespace exists
+  ansible.builtin.command: kubectl create namespace argocd
+  register: argocd_ns_create
+  failed_when: argocd_ns_create.rc != 0 and 'AlreadyExists' not in argocd_ns_create.stderr
+  changed_when: argocd_ns_create.rc == 0
+
+- name: Generate imagePullSecret manifest for Gitea registry
+  ansible.builtin.command: >
+    kubectl create secret docker-registry gitea-registry-pull
+    --docker-server=gitea.cluster.local:3000
+    --docker-username={{ gitea_admin_username }}
+    --docker-password={{ gitea_admin_password }}
+    -n argocd
+    --dry-run=client -o yaml
+  register: gitea_pull_secret_manifest
+  no_log: true
+  changed_when: false
+
+- name: Write imagePullSecret manifest to file
+  ansible.builtin.copy:
+    content: "{{ gitea_pull_secret_manifest.stdout }}"
+    dest: "/home/{{ ansible_user }}/gitea-registry-pull-secret.yaml"
+    mode: '0600'
+  no_log: true
+
+- name: Apply the imagePullSecret
+  ansible.builtin.command: >
+    kubectl apply -f /home/{{ ansible_user }}/gitea-registry-pull-secret.yaml
+  register: pull_secret_apply
+  changed_when: "'configured' in pull_secret_apply.stdout or 'created' in pull_secret_apply.stdout"
+
 - name: Copy vendored ArgoCD chart to server
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/argocd/argo-cd/"

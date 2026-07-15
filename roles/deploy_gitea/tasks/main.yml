@@ -28,10 +28,16 @@
   register: gitea_secret_manifest
   no_log: true
 
+- name: Check if Gitea admin secret exists
+  ansible.builtin.command: >
+    kubectl get secret gitea-admin-secret -n gitea --ignore-not-found
+  register: gitea_secret_check
+  changed_when: false
+
 - name: Apply Gitea admin Secret
   ansible.builtin.command: >
     kubectl apply -f /home/{{ ansible_user }}/gitea-admin-secret.yaml
-  when: gitea_secret_manifest.changed
+  when: gitea_secret_manifest.changed or gitea_secret_check.stdout == ""
   register: gitea_secret_result
   changed_when: "'configured' in gitea_secret_result.stdout or 'created' in gitea_secret_result.stdout"
 
@@ -60,4 +66,13 @@
   become: true
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for Gitea to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available deployment/gitea
+    -n gitea --timeout=300s
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
   

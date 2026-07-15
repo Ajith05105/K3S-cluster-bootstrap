@@ -456,7 +456,7 @@ gitea:
       SSH_PORT: 22 # rootful image
       SSH_LISTEN_PORT: 2222 # rootless image
       DOMAIN: gitea.cluster.local
-      ROOT_URL: "http://gitea.cluster.local/"
+      ROOT_URL: "http://gitea.cluster.local:3000/"
       OFFLINE_MODE: true
 
     database:
