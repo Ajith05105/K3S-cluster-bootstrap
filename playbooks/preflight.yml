@@ -155,12 +155,12 @@
     - name: Pull kube-vip-cloud-provider image for arm64
       ansible.builtin.command: >
         podman pull --platform linux/arm64
-        ghcr.io/kube-vip/kube-vip-cloud-provider:v0.0.12
+        ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
       when: not cloud_provider_tar.stat.exists
 
     - name: Save kube-vip-cloud-provider image
       ansible.builtin.command: >
-        podman save ghcr.io/kube-vip/kube-vip-cloud-provider:v0.0.12
+        podman save ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
         -o /tmp/k3s-images/kube-vip-cloud-provider.tar
       when: not cloud_provider_tar.stat.exists
 
@@ -328,24 +328,24 @@
     - name: Pull redis image for arm64
       ansible.builtin.command: >
         podman pull --platform linux/arm64
-        public.ecr.aws/docker/library/redis:8.2.3-alpine
+        public.ecr.aws/docker/library/redis:{{ redis_version }}
       when: not redis_tar.stat.exists
 
     - name: Save redis image
       ansible.builtin.command: >
-        podman save public.ecr.aws/docker/library/redis:8.2.3-alpine
+        podman save public.ecr.aws/docker/library/redis:{{ redis_version }}
         -o /tmp/k3s-images/redis.tar
       when: not redis_tar.stat.exists
 
     - name: Pull dex image for arm64
       ansible.builtin.command: >
         podman pull --platform linux/arm64
-        ghcr.io/dexidp/dex:v2.45.1
+        ghcr.io/dexidp/dex:{{ dex_version }}
       when: not dex_tar.stat.exists
 
     - name: Save dex image
       ansible.builtin.command: >
-        podman save ghcr.io/dexidp/dex:v2.45.1
+        podman save ghcr.io/dexidp/dex:{{ dex_version }}
         -o /tmp/k3s-images/dex.tar
       when: not dex_tar.stat.exists
 

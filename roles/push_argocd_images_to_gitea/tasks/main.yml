@@ -27,7 +27,7 @@
 - name: Push redis image to Gitea registry via crane
   ansible.builtin.command: >
     crane push /var/lib/rancher/k3s/agent/images/redis.tar
-    {{ gitea_cluster_ip.stdout }}:3000/admin/redis:8.2.3-alpine
+    {{ gitea_cluster_ip.stdout }}:3000/admin/redis:{{ redis_version }}
     --insecure
   register: crane_push_redis
   until: crane_push_redis.rc == 0
@@ -38,7 +38,7 @@
 - name: Push dex image to Gitea registry via crane
   ansible.builtin.command: >
     crane push /var/lib/rancher/k3s/agent/images/dex.tar
-    {{ gitea_cluster_ip.stdout }}:3000/admin/dex:v2.45.1
+    {{ gitea_cluster_ip.stdout }}:3000/admin/dex:{{ dex_version }}
     --insecure
   register: crane_push_dex
   until: crane_push_dex.rc == 0

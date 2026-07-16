@@ -27,9 +27,11 @@
         "gitea.cluster.local:3000":
           tls:
             insecure_skip_verify: true
-          auth:
-            username: "{{ gitea_admin_username }}"
-            password: "{{ gitea_admin_password }}"
+          # NOTE: no auth block here on purpose — containerd does not reliably
+          # apply configs.*.auth to mirror-endpoint requests on this k3s version
+          # (confirmed via multiple open k3s-io/k3s issues). Credentials for
+          # scheduled pods are handled by the imagePullSecret in deploy_argocd
+          # instead; this section only needs the TLS/insecure bit.
   register: registries_config
   no_log: true
 

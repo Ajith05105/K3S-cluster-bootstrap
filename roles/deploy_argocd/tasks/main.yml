@@ -30,6 +30,11 @@
   register: pull_secret_apply
   changed_when: "'configured' in pull_secret_apply.stdout or 'created' in pull_secret_apply.stdout"
 
+- name: Remove staged imagePullSecret file from server
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/gitea-registry-pull-secret.yaml"
+    state: absent
+
 - name: Copy vendored ArgoCD chart to server
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/argocd/argo-cd/"
