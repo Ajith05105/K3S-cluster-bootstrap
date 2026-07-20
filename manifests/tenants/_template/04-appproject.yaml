@@ -6,7 +6,7 @@ metadata:
 spec:
   description: "Tenant: alice — locked to their own repo and namespace"
   sourceRepos:
-    - "http://gitea.cluster.local:3000/alice/*"
+    - "http://gitea-http.gitea.svc.cluster.local:3000/alice/*"
   destinations:
     - namespace: alice
       server: https://kubernetes.default.svc
