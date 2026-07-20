@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
-  name: TENANT_NAME
+  name: alice
   namespace: argocd
 spec:
-  description: "Tenant: TENANT_NAME — locked to their own repo and namespace"
+  description: "Tenant: alice — locked to their own repo and namespace"
   sourceRepos:
-    - "http://gitea-http.gitea.svc.cluster.local:3000/TENANT_NAME/*"
+    - "http://gitea-http.gitea.svc.cluster.local:3000/alice/*"
   destinations:
-    - namespace: TENANT_NAME
+    - namespace: alice
       server: https://kubernetes.default.svc
   clusterResourceWhitelist: []
   namespaceResourceBlacklist:

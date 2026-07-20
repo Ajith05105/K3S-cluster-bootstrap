@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: TENANT_NAME-quota
-  namespace: TENANT_NAME
+  name: alice-quota
+  namespace: alice
 spec:
   hard:
     requests.cpu: "500m"

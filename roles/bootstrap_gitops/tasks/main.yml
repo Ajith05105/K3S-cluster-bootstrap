@@ -1,0 +1,133 @@
+---
+- name: Ensure git is installed on the server
+  ansible.builtin.apt:
+    name: git
+    state: present
+  become: true
+
+- name: Get Gitea's in-cluster ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea-http -n gitea -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  changed_when: false
+
+- name: Check if cluster-config repo already exists in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/repos/{{ gitea_admin_username }}/cluster-config"
+    method: GET
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: cluster_config_check
+  no_log: true
+
+- name: Create cluster-config repo in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/user/repos"
+    method: POST
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: cluster-config
+      private: true
+      auto_init: false
+    status_code: [201]
+  when: cluster_config_check.status == 404
+  no_log: true
+
+- name: Stage manifests directory on server for pushing
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/"
+    dest: "/home/{{ ansible_user }}/cluster-config-push/"
+    mode: '0755'
+
+- name: Exclude vendored chart directories from the GitOps repo
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/cluster-config-push/{{ item }}"
+    state: absent
+  loop:
+    - argocd/argo-cd
+    - gitea/gitea
+
+- name: Initialize local git repo and commit manifests
+  ansible.builtin.shell: |
+    set -e
+    cd /home/{{ ansible_user }}/cluster-config-push
+    rm -rf .git
+    git init -q -b main
+    git config user.email "admin@cluster.local"
+    git config user.name "admin"
+    git add -A
+    git commit -q -m "chore: sync cluster-config from ansible repo" --allow-empty
+  changed_when: true
+
+- name: Force-push manifests into the cluster-config repo
+  ansible.builtin.shell: |
+    cd /home/{{ ansible_user }}/cluster-config-push
+    git push -q -f "http://{{ gitea_admin_username }}:{{ gitea_admin_password }}@{{ gitea_cluster_ip.stdout }}:3000/{{ gitea_admin_username }}/cluster-config.git" main
+  no_log: true
+  changed_when: true
+
+- name: Generate ArgoCD repository Secret manifest
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/cluster-config-repo-secret.yaml"
+    mode: '0600'
+    content: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cluster-config-repo
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      stringData:
+        type: git
+        url: "http://gitea-http.gitea.svc.cluster.local:3000/{{ gitea_admin_username }}/cluster-config.git"
+        username: "{{ gitea_admin_username }}"
+        password: "{{ gitea_admin_password }}"
+  no_log: true
+
+- name: Apply the ArgoCD repository Secret
+  ansible.builtin.command: >
+    kubectl apply -f /home/{{ ansible_user }}/cluster-config-repo-secret.yaml
+  changed_when: true
+
+- name: Remove staged repo secret file
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/cluster-config-repo-secret.yaml"
+    state: absent
+
+- name: Generate tenants Application manifest
+  ansible.builtin.copy:
+    dest: "/home/{{ ansible_user }}/tenants-app.yaml"
+    mode: '0644'
+    content: |
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: tenants
+        namespace: argocd
+      spec:
+        project: default
+        source:
+          repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/{{ gitea_admin_username }}/cluster-config.git"
+          targetRevision: HEAD
+          path: tenants
+          directory:
+            recurse: true
+            exclude: '_template/*'
+        destination:
+          server: https://kubernetes.default.svc
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+
+- name: Apply the tenants Application
+  ansible.builtin.command: kubectl apply -f /home/{{ ansible_user }}/tenants-app.yaml
+  changed_when: true

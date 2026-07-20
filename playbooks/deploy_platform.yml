@@ -21,6 +21,7 @@
   roles:
     - push_argocd_images_to_gitea
     - deploy_argocd
+    - bootstrap_gitops
 
 - name: Configure local DNS entries for cluster services
   hosts: localhost

@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny
-  namespace: TENANT_NAME
+  namespace: alice
 spec:
   podSelector: {}
   policyTypes:
@@ -13,7 +13,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-dns
-  namespace: TENANT_NAME
+  namespace: alice
 spec:
   podSelector: {}
   policyTypes:
@@ -36,7 +36,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-ingress-from-traefik
-  namespace: TENANT_NAME
+  namespace: alice
 spec:
   podSelector: {}
   policyTypes:
@@ -54,7 +54,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-to-gitea-registry
-  namespace: TENANT_NAME
+  namespace: alice
 spec:
   podSelector: {}
   policyTypes:
