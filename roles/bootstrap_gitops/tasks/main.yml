@@ -38,19 +38,26 @@
   when: cluster_config_check.status == 404
   no_log: true
 
-- name: Stage manifests directory on server for pushing
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../../manifests/"
-    dest: "/home/{{ ansible_user }}/cluster-config-push/"
-    mode: '0755'
-
-- name: Exclude vendored chart directories from the GitOps repo
+- name: Ensure staging directory ownership matches the ansible user (fixes root-owned leftovers)
   ansible.builtin.file:
-    path: "/home/{{ ansible_user }}/cluster-config-push/{{ item }}"
-    state: absent
-  loop:
-    - argocd/argo-cd
-    - gitea/gitea
+    path: "/home/{{ ansible_user }}/cluster-config-push"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    recurse: true
+  ignore_errors: true
+
+- name: Sync manifests directory to server via rsync (fast, excludes vendored charts)
+  ansible.builtin.command: >
+    rsync -a --no-g --no-o --delete
+    --exclude=argocd/argo-cd
+    --exclude=gitea/gitea
+    -e ssh
+    {{ role_path }}/../../manifests/
+    {{ ansible_user }}@{{ ansible_host }}:/home/{{ ansible_user }}/cluster-config-push/
+  delegate_to: localhost
+  become: false
+  changed_when: true
 
 - name: Initialize local git repo and commit manifests
   ansible.builtin.shell: |
@@ -100,34 +107,64 @@
     path: "/home/{{ ansible_user }}/cluster-config-repo-secret.yaml"
     state: absent
 
-- name: Generate tenants Application manifest
+- name: Generate tenants ApplicationSet manifest
   ansible.builtin.copy:
-    dest: "/home/{{ ansible_user }}/tenants-app.yaml"
+    dest: "/home/{{ ansible_user }}/tenants-appset.yaml"
     mode: '0644'
     content: |
       apiVersion: argoproj.io/v1alpha1
-      kind: Application
+      kind: ApplicationSet
       metadata:
         name: tenants
         namespace: argocd
       spec:
-        project: default
-        source:
-          repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/{{ gitea_admin_username }}/cluster-config.git"
-          targetRevision: HEAD
-          path: tenants
-          directory:
-            recurse: true
-            exclude: '_template/*'
-        destination:
-          server: https://kubernetes.default.svc
-        syncPolicy:
-          automated:
-            prune: true
-            selfHeal: true
-          syncOptions:
-            - CreateNamespace=true
+        generators:
+          - git:
+              repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/{{ gitea_admin_username }}/cluster-config.git"
+              revision: HEAD
+              files:
+                - path: "tenants/declarations/*.yaml"
+        template:
+          metadata:
+            name: 'tenant-{{ '{{tenantName}}' }}'
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/{{ gitea_admin_username }}/cluster-config.git"
+              targetRevision: HEAD
+              path: tenants/_chart
+              helm:
+                parameters:
+                  - name: tenantName
+                    value: '{{ '{{tenantName}}' }}'
+            destination:
+              server: https://kubernetes.default.svc
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
 
-- name: Apply the tenants Application
-  ansible.builtin.command: kubectl apply -f /home/{{ ansible_user }}/tenants-app.yaml
+- name: Apply the tenants ApplicationSet
+  ansible.builtin.command: kubectl apply -f /home/{{ ansible_user }}/tenants-appset.yaml
   changed_when: true
+
+- name: Find all tenant declaration files
+  ansible.builtin.find:
+    paths: "{{ role_path }}/../../manifests/tenants/declarations"
+    patterns: "*.yaml"
+  delegate_to: localhost
+  become: false
+  register: tenant_declarations
+
+- name: Derive tenant names from declaration filenames
+  ansible.builtin.set_fact:
+    tenant_names: "{{ tenant_declarations.files | map(attribute='path') | map('basename') | map('regex_replace', '\\.yaml$', '') | list }}"
+
+- name: Onboard each declared tenant's Gitea account, repo, and credentials
+  ansible.builtin.include_tasks: onboard_one_tenant.yml
+  loop: "{{ tenant_names }}"
+  loop_control:
+    loop_var: this_tenant

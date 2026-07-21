@@ -1,0 +1,6 @@
+---
+- name: Sync tenants to cluster-config (fast path, no full redeploy)
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
+    - bootstrap_gitops
