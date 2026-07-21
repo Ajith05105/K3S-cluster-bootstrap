@@ -1,19 +1,33 @@
 # k3s Cluster Bootstrap Playbook
 
-Automated bare-metal K3s cluster deployment on Raspberry Pi 5. One command takes you from powered-off Pis to a self-healing HA control plane that manages itself after the laptop is unplugged.
+Automated bare-metal K3s cluster deployment on Raspberry Pi 5, with a full
+GitOps platform (Gitea + ArgoCD) and a multi-tenant security model on top.
+One command takes you from powered-off Pis to a self-healing, HA control
+plane; a second gets Gitea, ArgoCD, and tenant isolation running, all
+version-controlled and self-syncing after that.
 
 ## How It Works
 
 ```
 ansible-playbook playbooks/site.yml
         │
-        ├── preflight.yml              → build custom ARM64 images on laptop
-        ├── prepare_nodes.yml          → DHCP → discover Pis → static IP + cgroups
-        ├── bootstrap_control_plane.yml → install k3s HA cluster (serial)
-        └── deploy_platform.yml        → deploy dnsmasq + ansible-runner into cluster
+        ├── preflight.yml               → build custom ARM64 images + vendor Helm charts on laptop
+        ├── prepare_nodes.yml           → DHCP → discover Pis → static IP + cgroups
+        ├── bootstrap_control_plane.yml → install k3s HA cluster + kube-vip (serial)
+        └── deploy_platform.yml         → Gitea, ArgoCD, registry mirror, tenants, GitOps bootstrap
 ```
 
-After `deploy_platform.yml` completes, the laptop can be unplugged. The cluster runs a **dnsmasq pod** as its own DHCP server and an **ansible-runner pod** that auto-joins new nodes when they boot — no human intervention needed.
+After `deploy_platform.yml` completes, the laptop can be unplugged. The cluster
+runs its own DHCP server, auto-joins new nodes when they boot, and syncs
+itself against a Git repo — no human intervention needed for day-to-day
+operation.
+
+For tenant-only changes (adding/editing a tenant, without touching the rest
+of the platform), there's a fast path that skips the full redeploy:
+
+```bash
+ansible-playbook playbooks/sync_tenants.yml
+```
 
 ## Requirements
 
@@ -21,6 +35,7 @@ After `deploy_platform.yml` completes, the laptop can be unplugged. The cluster 
 - Ansible: `pip install ansible`
 - Podman: `apt install podman`
 - QEMU for ARM64 cross-builds: `apt install qemu-user-static binfmt-support`
+- Helm: `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash`
 - USB ethernet adapter connected to the Pi switch
 
 **Raspberry Pi 5 nodes**:
@@ -69,24 +84,31 @@ users:
 cp inventories/production/group_vars/all.yml.example inventories/production/group_vars/all.yml
 ```
 
-Edit `all.yml` — key values:
+`all.yml` has grown a lot since this project started — every pinned version,
+credential, and network setting the roles need lives there now. Key groups:
 
 ```yaml
-ansible_user: pi
-ansible_ssh_private_key_file: ~/.ssh/id_ed25519
-ansible_runner_private_key: ~/.ssh/ansible_runner_key
-ansible_runner_public_key: ~/.ssh/ansible_runner_key.pub
-
-k3s_token: <any-long-random-string>
-
-bootstrap_interface: enxa0cec892dc0f   # your USB ethernet adapter — check with: ip a
-gateway_ip: 192.168.1.1  # IP to assign your laptop on that interface
+# Network — laptop interface connected to the Pi switch
+bootstrap_interface: enxa0cec892dc0f   # check with: ip a
+gateway_ip: 192.168.1.1                # your LAN's actual default route
 dhcp_range_start: 192.168.1.200
 dhcp_range_end: 192.168.1.254
-subnet_mask: 255.255.255.0
+
+# kube-vip — HA control-plane VIP + LoadBalancer IP range
+kube_vip_interface: eth0
+kube_vip_vip: 192.168.1.50
+
+# Everything pulled/vendored during preflight is version-pinned here —
+# helm_version, gitea_version, gitea_chart_version, argocd_version,
+# argocd_chart_version, dex_version, redis_version,
+# kube_vip_cloud_provider_version — see all.yml.example for the full list
 ```
 
-> `all.yml` and `hosts.yml` are gitignored — never committed. They contain secrets and environment-specific config.
+> `all.yml` and `hosts.yml` are gitignored — never committed. They contain
+> secrets and environment-specific config. So are the vendored chart
+> directories under `manifests/*/` — those are fetched fresh by
+> `preflight.yml` (idempotent, skips if already present), not hand-edited or
+> checked in, the same way you wouldn't commit `node_modules/`.
 
 ## Usage
 
@@ -107,56 +129,127 @@ subnet_mask: 255.255.255.0
 To run individual stages:
 
 ```bash
-ansible-playbook playbooks/preflight.yml          # build images only
-ansible-playbook playbooks/prepare_nodes.yml      # DHCP + discovery + node prep
-ansible-playbook playbooks/bootstrap_control_plane.yml  # k3s install
-ansible-playbook playbooks/deploy_platform.yml    # in-cluster services
+ansible-playbook playbooks/preflight.yml               # build images + vendor charts only
+ansible-playbook playbooks/prepare_nodes.yml           # DHCP + discovery + node prep
+ansible-playbook playbooks/bootstrap_control_plane.yml # k3s + kube-vip install
+ansible-playbook playbooks/deploy_platform.yml         # Gitea, ArgoCD, tenants, GitOps
+ansible-playbook playbooks/sync_tenants.yml            # tenants only, fast path
 ```
 
 ## Self-Healing Agent Join
 
-Once deployed, adding a new node requires zero manual steps:
+Once deployed, adding a new node requires zero manual steps — confirmed
+working in practice, not just in theory:
 
 1. Flash a new Pi — include both SSH keys in `user-data`
-2. Set hostname: `server` in name → control plane, anything else → agent
+2. Set hostname: anything without `server` in it → joins as an agent
 3. Plug into switch and power on
 
-The **lease-watcher** sidecar detects the new DHCP lease. The **ansible-runner** pod SSHes in and joins it to the cluster. Check logs:
+The **lease-watcher** sidecar detects the new DHCP lease. The **ansible-runner**
+pod — a plain Python/paramiko script, despite the name, not literally
+Ansible — SSHes in and joins it to the cluster. Check logs:
 
 ```bash
 kubectl logs -n kube-system -l app=ansible-runner -f
 kubectl exec -n kube-system -l app=dnsmasq -- cat /var/lib/dnsmasq/dnsmasq.leases
 ```
 
+Currently handles new **agents** only — adding another control-plane node
+still goes through the manual `bootstrap_control_plane.yml` path.
+
+## GitOps & Platform Services
+
+Everything from here down runs *inside* the cluster and manages itself via
+Git, not via `kubectl` or Ansible re-runs.
+
+**Gitea** (`manifests/gitea/`) is both the git server and the container
+registry for the whole cluster. It's deployed via its official Helm chart,
+vendored offline during `preflight.yml`. Its own image gets imported
+directly from a tarball, since — chicken-and-egg — there's no registry to
+pull it from until it's already running.
+
+**Registry mirroring**: every node trusts `gitea.cluster.local:3000` as a
+registry mirror (`configure_registry`). ArgoCD, Gitea's own images, and
+dex/redis are all crane-pushed into it during deploy, so the cluster never
+depends on live internet access to pull its own platform images. Anything a
+*tenant* pulls (their own app images) works the same way, through their own
+Gitea registry namespace.
+
+**ArgoCD** (`manifests/argocd/`) is deployed via Helm, images pointed at the
+Gitea mirror, pinned to control-plane nodes. Credentials for pulling from
+Gitea are handled via a Kubernetes `imagePullSecret` rather than containerd's
+own registry-auth mechanism — that mechanism turned out to have a real,
+currently-unresolved bug on this k3s version (confirmed against multiple
+open `k3s-io/k3s` issues), so this sidesteps it rather than fighting it.
+
+**`cluster-config`**, a private repo Gitea hosts for itself, is what ArgoCD
+actually watches. `bootstrap_gitops` force-pushes this repo's own
+`manifests/` directory into it on every run — so the ansible repo is always
+the real source of truth; Gitea is a mirror of it, never edited directly.
+
+## Multi-Tenant Security Model
+
+Tenants interact with the cluster **only** through Git — no `kubectl`, no
+SSH, no direct cluster access at all. Their blast radius is exactly their
+own namespace, enforced by four independent controls, each individually
+tested against a real attack, not just declared:
+
+- **PodSecurity** (`restricted` profile) — no root, no privilege escalation, capabilities dropped. Rejects a non-compliant pod outright, before it's even created.
+- **ResourceQuota + LimitRange** — a hard per-namespace ceiling, plus sane per-container defaults so tenants don't need to know Kubernetes resource syntax. Both are configurable per tenant (see below).
+- **NetworkPolicy** — default-deny, with narrow allows for DNS, inbound via Traefik, and outbound to the Gitea registry. Verified empirically: a tenant pod is refused reaching another namespace; the same command from a platform pod succeeds.
+- **AppProject** — the GitOps-specific boundary. Locks a tenant's `Application` to their own repo and namespace, and blocks them from creating cluster-scoped resources *or* tampering with their own quota/NetworkPolicy from inside their own repo. Tested directly: a real `git push` containing a cross-namespace Deployment and a cluster-admin `ClusterRole` was rejected by ArgoCD by name, with the specific rule that caught each one.
+
+**Onboarding a tenant** is a one-line file, not a folder of duplicated YAML:
+
+```bash
+cat > manifests/tenants/declarations/bob.yaml << EOF
+tenantName: bob
+memRequest: "128Mi"
+memLimit: "256Mi"
+cpuRequest: "100m"
+cpuLimit: "200m"
+EOF
+git add manifests/tenants/declarations/bob.yaml
+git commit -m "feat: onboard bob"
+ansible-playbook playbooks/sync_tenants.yml
+```
+
+That's rendered through one shared chart (`manifests/tenants/_chart/`) by an
+ArgoCD `ApplicationSet`, which also triggers `bootstrap_gitops` to create
+bob's Gitea account and personal `app` repo automatically, with a randomly
+generated password stored as a Kubernetes Secret — never hardcoded, never
+committed, same pattern ArgoCD itself uses for its own admin password.
+
 ## Project Structure
 
 ```
 .
 ├── playbooks/
-│   ├── site.yml                     # entry point
-│   ├── preflight.yml                # build custom ARM64 images
+│   ├── site.yml                     # full bootstrap entry point
+│   ├── preflight.yml                # build images, vendor Helm charts
 │   ├── prepare_nodes.yml            # DHCP, discovery, node prep
-│   ├── bootstrap_control_plane.yml  # k3s install
-│   └── deploy_platform.yml          # in-cluster dnsmasq + ansible-runner
+│   ├── bootstrap_control_plane.yml  # k3s + kube-vip install
+│   ├── deploy_platform.yml          # dnsmasq, ansible-runner, Gitea, ArgoCD, tenants
+│   └── sync_tenants.yml             # tenants-only fast path
 ├── roles/
-│   ├── laptop_dhcp/                 # dnsmasq DHCP on bootstrap laptop
-│   ├── node_prep/                   # static IP, cgroups, reboot
-│   ├── copy_binaries/               # copy k3s binary + images to nodes
-│   ├── k3s_server/                  # install k3s control plane
-│   ├── platform_configmaps/         # ConfigMaps for dnsmasq config + node registry
-│   ├── deploy_dnsmasq/              # deploy in-cluster DHCP pod
-│   └── deploy_ansible_runner/       # deploy in-cluster Ansible runner pod
+│   ├── laptop_dhcp/, node_prep/, copy_binaries/, k3s_server/
+│   ├── deploy_kube_vip/             # HA VIP + LoadBalancer support
+│   ├── platform_configmaps/, deploy_dnsmasq/, deploy_ansible_runner/
+│   ├── deploy_gitea/, configure_registry/
+│   ├── push_argocd_images_to_gitea/, deploy_argocd/
+│   └── bootstrap_gitops/            # cluster-config repo, tenant onboarding
 ├── custom_images/
-│   ├── dnsmasq/                     # in-cluster DHCP server (ARM64)
-│   ├── lease-watcher/               # watches leases, triggers agent join
-│   └── ansible-runner/              # Ansible + SSH, runs inside cluster
+│   ├── dnsmasq/, lease-watcher/, ansible-runner/
 ├── manifests/
-│   ├── dnsmasq/                     # Deployment + ServiceAccount
-│   └── ansible-runner/              # Deployment + ServiceAccount
-├── scripts/
-│   └── discovery.py                 # reads dnsmasq leases → writes hosts.yml
+│   ├── dnsmasq/, ansible-runner/
+│   ├── gitea/                       # values.yaml (chart vendored, gitignored)
+│   ├── argocd/                      # values.yaml (chart vendored, gitignored)
+│   └── tenants/
+│       ├── _chart/                  # shared Helm chart for every tenant
+│       └── declarations/            # one file per tenant
+├── scripts/discovery.py
 └── inventories/production/
-    ├── hosts.yml                    # auto-generated by discovery — gitignored
+    ├── hosts.yml                    # auto-generated — gitignored
     └── group_vars/
         ├── all.yml                  # your config — gitignored
         └── all.yml.example          # start here
@@ -164,14 +257,17 @@ kubectl exec -n kube-system -l app=dnsmasq -- cat /var/lib/dnsmasq/dnsmasq.lease
 
 ## Known Limitations
 
-- `dnsmasq-config.yaml.j2` has a hardcoded DHCP range (`192.168.1.101–199`) and interface (`eth0`) — these should become variables in `all.yml`
-- `node_prep` hardcodes `eth0` as the Pi ethernet interface name — may differ on some hardware
-- `bootstrap_control_plane.yml` downloads the latest k3s with no pinned version — pin `k3s_version` in `all.yml` for reproducible deployments
-- Joining servers use server-1's raw IP rather than a VIP — for true HA the join URL should point to a kube-vip virtual IP
+- Joining additional control-plane nodes still uses server-1's raw IP, not kube-vip's VIP — true HA join isn't wired up yet, even though kube-vip itself is running and serving LoadBalancer IPs correctly.
+- ArgoCD and Gitea are both served over plain HTTP, no TLS. Deliberate for now, not an oversight — this is a physically access-controlled LAN, not a publicly exposed service, and self-signed certs would add complexity without a real threat they'd defend against here. Worth revisiting with cert-manager + an internal CA if that changes.
+- Kubernetes Secrets in etcd are base64-encoded, not encrypted at rest (k3s's default). Every credential this project generates — tenant passwords included — lives there. Enabling `--secrets-encryption` needs reinstalling k3s server-side, so it's a real, separate task, not a quick patch.
+- No persistent NTP. Node clocks drift on every reboot (no RTC on these Pis) and nothing auto-corrects it — this has caused real, repeated failures during development. An in-cluster NTP server is planned; running it on the NAT-router Pi instead of inside Kubernetes would be more robust, since it sidesteps the cluster needing correct time to bootstrap the very thing that would give it correct time.
+- A tenant's Gitea login password and the credential ArgoCD uses to keep syncing their repo are currently the same value. Decoupling these (a separate access token for ArgoCD) would let a tenant change their own password without silently breaking their sync — not done yet.
+- The `ApplicationSet` that generates tenants polls Git on its own ~3 minute timer, separate from a normal Application's refresh. A new or edited tenant can take a few minutes to actually take effect. A Gitea webhook would close this gap if onboarding speed ever matters.
+- No backup/snapshot mechanism yet for Gitea's PVC (repos + registry data) — local-path storage, single node, no redundancy. Real HA is likely not worth the complexity here (Gitea's SQLite backend is single-writer regardless); a periodic backup is the right-sized fix and is planned.
 
 ## Hardware
 
 Tested on:
-- Raspberry Pi 5 (ARM64, 8GB)
+- Raspberry Pi 5 (ARM64, 8GB) × 3 control-plane nodes, plus a 4th Pi acting as NAT router for the LAN (not part of the k3s cluster itself)
 - Ubuntu Server 24.04 LTS
-- Bootstrap laptop: Ubuntu 24.04 MATE with TP-Link UE300 USB ethernet adapter
+- Bootstrap laptop: Ubuntu 24.04 with a USB ethernet adapter
