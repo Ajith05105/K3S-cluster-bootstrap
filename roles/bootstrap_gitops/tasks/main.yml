@@ -138,6 +138,14 @@
                 parameters:
                   - name: tenantName
                     value: '{{ '{{tenantName}}' }}'
+                  - name: memRequest
+                    value: '{{ '{{memRequest}}' }}'
+                  - name: memLimit
+                    value: '{{ '{{memLimit}}' }}'
+                  - name: cpuRequest
+                    value: '{{ '{{cpuRequest}}' }}'
+                  - name: cpuLimit
+                    value: '{{ '{{cpuLimit}}' }}'
             destination:
               server: https://kubernetes.default.svc
             syncPolicy:

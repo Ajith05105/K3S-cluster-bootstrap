@@ -7,11 +7,11 @@ spec:
   limits:
     - type: Container
       default:
-        cpu: "200m"
-        memory: "256Mi"
+        cpu: {{ .Values.cpuLimit }}
+        memory: {{ .Values.memLimit }}
       defaultRequest:
-        cpu: "100m"
-        memory: "128Mi"
+        cpu: {{ .Values.cpuRequest }}
+        memory: {{ .Values.memRequest }}
       max:
         cpu: "1"
         memory: "1Gi"
