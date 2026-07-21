@@ -1,5 +1,5 @@
 tenantName: william
-memRequest: "128Mi"
+memRequest: "50Mi"
 memLimit: "100Mi"
 cpuRequest: "100m"
 cpuLimit: "200m"
