@@ -1,0 +1,16 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.tenantName }}
+  namespace: argocd
+spec:
+  project: {{ .Values.tenantName }}
+  source:
+    repoURL: "http://gitea-http.gitea.svc.cluster.local:3000/{{ .Values.tenantName }}/app.git"
+    targetRevision: HEAD
+    path: .
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.tenantName }}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}

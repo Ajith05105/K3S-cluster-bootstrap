@@ -1,0 +1,4 @@
+apiVersion: v2
+name: tenant
+description: Per-tenant namespace, quota, isolation, and GitOps boundary
+version: 0.1.0

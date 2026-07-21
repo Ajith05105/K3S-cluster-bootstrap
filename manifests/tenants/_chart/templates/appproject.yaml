@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: {{ .Values.tenantName }}
+  namespace: argocd
+spec:
+  description: "Tenant: {{ .Values.tenantName }} — locked to their own repo and namespace"
+  sourceRepos:
+    - "http://gitea-http.gitea.svc.cluster.local:3000/{{ .Values.tenantName }}/*"
+  destinations:
+    - namespace: {{ .Values.tenantName }}
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - {group: "", kind: ResourceQuota}
+    - {group: "", kind: LimitRange}
+    - {group: networking.k8s.io, kind: NetworkPolicy}
