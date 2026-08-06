@@ -26,6 +26,8 @@
             routes:
               - to: default
                 via: {{gateway_ip}}
+            nameservers:
+              addresses: [1.1.1.1, 8.8.8.8]
         
 
 - name: Remove cloud-init netplan config
