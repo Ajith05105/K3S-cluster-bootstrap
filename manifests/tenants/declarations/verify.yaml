@@ -1,0 +1,5 @@
+tenantName: verify
+memRequest: "64Mi"
+memLimit: "128Mi"
+cpuRequest: "50m"
+cpuLimit: "100m"

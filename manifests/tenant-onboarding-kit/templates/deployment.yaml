@@ -10,6 +10,8 @@ spec:
     metadata:
       labels: {app: app}
     spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
       imagePullSecrets:
         - name: registry-pull
       containers:
