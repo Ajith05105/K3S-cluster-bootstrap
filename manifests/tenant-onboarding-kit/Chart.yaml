@@ -1,0 +1,4 @@
+apiVersion: v2
+name: app
+description: Starter chart for a tenant's own application
+version: 0.1.0

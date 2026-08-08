@@ -98,3 +98,49 @@
   ansible.builtin.file:
     path: "/home/{{ ansible_user }}/tenant-{{ this_tenant }}-repo-secret.yaml"
     state: absent
+
+
+- name: "{{ this_tenant }}: prepare starter chart locally"
+  ansible.builtin.shell: |
+    set -e
+    rm -rf /tmp/starter-{{ this_tenant }}
+    cp -r /home/{{ ansible_user }}/cluster-config-push/tenant-onboarding-kit /tmp/starter-{{ this_tenant }}
+    sed -i "s#TENANT_NAME_PLACEHOLDER#{{ this_tenant }}#" /tmp/starter-{{ this_tenant }}/values.yaml
+    cd /tmp/starter-{{ this_tenant }}
+    git init -q -b main
+    git config user.email {{ this_tenant }}@cluster.local
+    git config user.name {{ this_tenant }}
+    git add -A
+    git commit -q -m "starter chart"
+  when: tenant_repo_check.status == 404
+  changed_when: true
+
+- name: "{{ this_tenant }}: push starter chart to their new repo"
+  ansible.builtin.shell: |
+    cd /tmp/starter-{{ this_tenant }}
+    git push -q -f http://{{ this_tenant }}:{{ tenant_password }}@{{ gitea_cluster_ip.stdout }}:3000/{{ this_tenant }}/app.git main
+  when: tenant_repo_check.status == 404
+  no_log: true
+  changed_when: true
+
+- name: "{{ this_tenant }}: wait for their namespace to exist (created async by ArgoCD)"
+  ansible.builtin.command: kubectl get namespace {{ this_tenant }}
+  register: namespace_check
+  until: namespace_check.rc == 0
+  retries: 40
+  delay: 15
+  changed_when: false
+
+- name: "{{ this_tenant }}: create their own registry-pull secret"
+  ansible.builtin.shell: |
+    kubectl create secret docker-registry registry-pull \
+      --docker-server=gitea.cluster.local:3000 \
+      --docker-username={{ this_tenant }} \
+      --docker-password={{ tenant_password }} \
+      -n {{ this_tenant }} --dry-run=client -o yaml | kubectl apply -f -
+  register: pull_secret_result
+  until: pull_secret_result.rc == 0
+  retries: 3
+  delay: 5
+  no_log: true
+  changed_when: true

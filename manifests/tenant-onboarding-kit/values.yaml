@@ -1,0 +1,8 @@
+image:
+  repository: TENANT_NAME_PLACEHOLDER/app
+  tag: latest
+replicas: 1
+port: 8080
+resources:
+  requests: {cpu: 50m, memory: 32Mi}
+  limits: {cpu: 100m, memory: 64Mi}
