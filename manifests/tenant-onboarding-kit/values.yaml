@@ -1,3 +1,4 @@
+tenantName: TENANT_NAME_PLACEHOLDER
 image:
   repository: TENANT_NAME_PLACEHOLDER/app
   tag: latest
