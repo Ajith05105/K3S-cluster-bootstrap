@@ -187,6 +187,39 @@ actually watches. `bootstrap_gitops` force-pushes this repo's own
 `manifests/` directory into it on every run — so the ansible repo is always
 the real source of truth; Gitea is a mirror of it, never edited directly.
 
+ArgoCD self-adopts `dnsmasq`, `kube-vip`, and `ansible-runner` as genuine,
+self-healing Applications watching their own paths in `cluster-config` — the
+same pattern proven with tenants. Gitea and ArgoCD's own installation are the
+two remaining components managed imperatively by Ansible, and that's a
+permanent floor, not a gap: neither can GitOps-manage its own first
+deployment before it exists to do the managing.
+
+**Pushing images to Gitea's registry** is always a command, for any
+registry anywhere — no registry, Gitea included, offers a browser upload for
+image layers, since the push protocol negotiates layers individually rather
+than sending one file. From any machine with `gitea.cluster.local` in its
+hosts file (the bootstrap laptop gets this automatically; a tenant's own
+machine needs the same one-time entry), pushing is the same standard
+workflow as any other registry:
+
+````bash
+podman login gitea.cluster.local -u <tenant> -p <password>
+podman push <image> gitea.cluster.local/<tenant>/app:<tag>
+````
+
+Since Gitea serves plain HTTP (see Known Limitations), any pushing machine
+needs to explicitly trust it as an insecure registry first:
+
+````bash
+# podman: /etc/containers/registries.conf
+[[registry]]
+location = "gitea.cluster.local"
+insecure = true
+
+# docker: /etc/docker/daemon.json
+{ "insecure-registries": ["gitea.cluster.local"] }
+```
+
 ## Multi-Tenant Security Model
 
 Tenants interact with the cluster **only** through Git — no `kubectl`, no
