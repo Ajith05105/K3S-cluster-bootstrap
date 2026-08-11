@@ -8,10 +8,19 @@ data:
     port=0
     interface=eth0
     bind-interfaces
-    dhcp-range=192.168.1.101,192.168.1.199,infinite
+    dhcp-range={{ cluster_dhcp_range_start }},{{ cluster_dhcp_range_end }},{{ cluster_dhcp_lease_time | default('infinite') }}
     dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
     dhcp-authoritative
     log-dhcp
+    # Without an explicit router option, dnsmasq advertises ITSELF as the
+    # gateway — i.e. whichever control-plane node this hostNetwork pod lands
+    # on. Any client that accepts that lease gets a default route pointing at
+    # a k3s node, which blackholes its traffic. That is what took the LAN
+    # offline on 2026-08-07 and cascaded into NTP/clock/token failures.
+    dhcp-option=3,{{ gateway_ip }}
+    # NTP server (option 42). Self-joined agents never run node_prep, so DHCP
+    # is the only way they learn about a time source.
+    dhcp-option=42,{{ cluster_ntp_server | default(gateway_ip) }}
 {% for host in groups['server'] %}
     dhcp-host={{ hostvars[host]['mac_address'] }},{{ hostvars[host]['ansible_host'] }},infinite
 {% endfor %}

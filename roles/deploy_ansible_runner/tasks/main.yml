@@ -37,10 +37,11 @@
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
   when: runner_sa_manifest.changed
 
-- name: Copy ansible-runner deployment manifest
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../../manifests/ansible-runner/deployment.yml"
+- name: Render ansible-runner deployment manifest
+  ansible.builtin.template:
+    src: deployment.yml.j2
     dest: /tmp/k8s_manifests/ansible-runner-deployment.yml
+    mode: '0644'
   register: runner_deploy_manifest
 
 - name: Apply ansible-runner deployment

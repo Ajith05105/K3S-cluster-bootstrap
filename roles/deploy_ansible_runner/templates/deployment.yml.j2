@@ -24,6 +24,17 @@ spec:
         - name: ansible-runner
           image: localhost/ansible-runner:latest
           imagePullPolicy: Never
+          env:
+            # Puts the VIP in a self-joined server's cert SANs (--tls-san),
+            # matching roles/k3s_server. Empty means the runner refuses server
+            # joins rather than creating a control-plane node the VIP can
+            # never cleanly fail over to.
+            - name: KUBE_VIP_VIP
+              value: "{{ kube_vip_vip | default('') }}"
+            # Self-joined agents never run node_prep, so this is the only way
+            # they get a persistent time source.
+            - name: NTP_SERVER
+              value: "{{ cluster_ntp_server | default(gateway_ip) }}"
           volumeMounts:
             - name: ssh-key
               mountPath: /root/.ssh/ansible_runner_key
@@ -42,7 +53,7 @@ spec:
         - name: ssh-key
           secret:
             secretName: ansible-runner-key
-            defaultMode: 0600 
+            defaultMode: 0600
         - name: k3s-binary
           hostPath:
             path: /usr/local/bin/k3s
