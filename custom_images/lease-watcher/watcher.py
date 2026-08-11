@@ -16,31 +16,32 @@ def load_k8s_client():
 
 
 def get_all_known_macs(api):
-    """Reads both ConfigMaps to track every MAC address currently in the cluster."""
+    """Read both ConfigMaps to track every MAC currently known to the cluster.
+
+    Fails CLOSED: if either read fails, this raises rather than returning a
+    partial set. The old behaviour was to warn and carry on, which meant a
+    transient API error could produce an empty known_macs — making every
+    control-plane node look brand new, so they got written into the worker
+    queue and picked up for agent provisioning. That is exactly how a
+    control-plane MAC ended up in worker-registry pointing at a dead IP.
+    """
     known_macs = set()
-    worker_cm = None  # Fix 1: Initialize to prevent unbound variable crash
 
     # 1. Parse Control Plane Static MACs
-    try:
-        cp_cm = api.read_namespaced_config_map(name=CP_CONFIGMAP, namespace=NAMESPACE)
-        if cp_cm.data and "nodes" in cp_cm.data:
-            for line in cp_cm.data["nodes"].splitlines():
-                parts = line.strip().split()
-                if parts:
-                    known_macs.add(parts[0].lower())
-    except Exception as e:
-        print(f"Warning reading control plane registry: {e}")
+    cp_cm = api.read_namespaced_config_map(name=CP_CONFIGMAP, namespace=NAMESPACE)
+    if cp_cm.data and "nodes" in cp_cm.data:
+        for line in cp_cm.data["nodes"].splitlines():
+            parts = line.strip().split()
+            if parts:
+                known_macs.add(parts[0].lower())
 
     # 2. Parse Worker Dynamic MACs
-    try:
-        worker_cm = api.read_namespaced_config_map(name=WORKER_CONFIGMAP, namespace=NAMESPACE)
-        if worker_cm.data and "workers" in worker_cm.data:
-            for line in worker_cm.data["workers"].splitlines():
-                parts = line.strip().split()
-                if parts:
-                    known_macs.add(parts[0].lower())
-    except Exception as e:
-        print(f"Warning reading worker registry: {e}")
+    worker_cm = api.read_namespaced_config_map(name=WORKER_CONFIGMAP, namespace=NAMESPACE)
+    if worker_cm.data and "workers" in worker_cm.data:
+        for line in worker_cm.data["workers"].splitlines():
+            parts = line.strip().split()
+            if parts:
+                known_macs.add(parts[0].lower())
 
     return worker_cm, known_macs
 
@@ -82,8 +83,10 @@ def main():
                     new_entries.append(entry)
                     known_macs.add(lease["mac"])
 
-            # 3. If there are changes, patch the worker registry ONLY
-            # Fix 2: Guard against patching if worker_cm couldn't be loaded
+            # 3. If there are changes, patch the worker registry ONLY.
+            #    worker_cm is guaranteed non-None here — get_all_known_macs
+            #    raises rather than returning partial state — but the check is
+            #    kept as a cheap guard against that contract changing.
             if new_entries and worker_cm is not None:
                 current_workers = worker_cm.data.get("workers", "") if worker_cm.data else ""
                 
@@ -109,7 +112,15 @@ def main():
                 print(f"Successfully updated worker registry with {len(new_entries)} new worker(s).")
 
         except Exception as e:
-            print(f"Error in execution loop: {e}")
+            # Skip the cycle entirely rather than acting on partial state.
+            # Also rebuild the client: a persistent 401 here usually means the
+            # cached credential went stale, and retrying forever with the same
+            # dead client is how this silently stopped working for weeks.
+            print(f"Error in execution loop, skipping cycle: {e}")
+            try:
+                api = load_k8s_client()
+            except Exception as reload_err:
+                print(f"Client reload failed: {reload_err}")
 
         time.sleep(POLL_INTERVAL)
 

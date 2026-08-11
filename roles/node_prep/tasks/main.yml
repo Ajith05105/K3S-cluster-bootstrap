@@ -3,11 +3,43 @@
     current_time: "{{ lookup('pipe', 'date +%Y-%m-%d\\ %H:%M:%S') }}"
   delegate_to: localhost
 
-- name: Sync time from bootstrap laptop
+# Seed the clock from the laptop so TLS works immediately — the NTP server
+# may not be reachable yet this early in a bootstrap. NTP is enabled straight
+# after to keep it correct from here on.
+- name: Seed system time from bootstrap laptop
   shell: |
     timedatectl set-ntp false
     sleep 2
     timedatectl set-time "{{ current_time }}"
+  become: true
+
+- name: Ensure timesyncd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/timesyncd.conf.d
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Point systemd-timesyncd at the LAN NTP server
+  ansible.builtin.copy:
+    dest: /etc/systemd/timesyncd.conf.d/10-cluster-ntp.conf
+    mode: '0644'
+    content: |
+      [Time]
+      NTP={{ cluster_ntp_server | default(gateway_ip) }}
+  become: true
+
+# Without this the clock is only ever correct at provisioning time. These Pis
+# have no battery-backed RTC, so after a reboot systemd restores whatever
+# stale timestamp it last saved — which is how two control-plane nodes ended
+# up 23 days behind, causing their API servers to reject ServiceAccount
+# tokens as not-yet-valid.
+- name: Enable persistent time sync
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    enabled: true
+    state: restarted
+    daemon_reload: true
   become: true
 
 - name: Set static IP via netplan
