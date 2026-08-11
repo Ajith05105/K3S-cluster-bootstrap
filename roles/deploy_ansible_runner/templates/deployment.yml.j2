@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ansible-runner
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ansible-runner
+  template:
+    metadata:
+      labels:
+        app: ansible-runner
+    spec:
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      serviceAccountName: ansible-runner
+      containers:
+        - name: ansible-runner
+          image: localhost/ansible-runner:latest
+          imagePullPolicy: Never
+          env:
+            # Puts the VIP in a self-joined server's cert SANs (--tls-san),
+            # matching roles/k3s_server. Empty means the runner refuses server
+            # joins rather than creating a control-plane node the VIP can
+            # never cleanly fail over to.
+            - name: KUBE_VIP_VIP
+              value: "{{ kube_vip_vip | default('') }}"
+            # Self-joined agents never run node_prep, so this is the only way
+            # they get a persistent time source.
+            - name: NTP_SERVER
+              value: "{{ cluster_ntp_server | default(gateway_ip) }}"
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /root/.ssh/ansible_runner_key
+              subPath: private-key
+              readOnly: true
+            - name: k3s-binary
+              mountPath: /usr/local/bin/k3s
+              readOnly: true
+            - name: k3s-install-script
+              mountPath: /home/pi/k3s-install.sh
+              readOnly: true
+            - name: k3s-airgap-images
+              mountPath: /var/lib/rancher/k3s/agent/images/k3s-airgap-images-arm64.tar.zst
+              readOnly: true
+      volumes:
+        - name: ssh-key
+          secret:
+            secretName: ansible-runner-key
+            defaultMode: 0600
+        - name: k3s-binary
+          hostPath:
+            path: /usr/local/bin/k3s
+            type: File
+        - name: k3s-install-script
+          hostPath:
+            path: /home/pi/k3s-install.sh
+            type: File
+        - name: k3s-airgap-images
+          hostPath:
+            path: /var/lib/rancher/k3s/agent/images/k3s-airgap-images-arm64.tar.zst
+            type: File
