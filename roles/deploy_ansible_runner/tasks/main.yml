@@ -37,20 +37,20 @@
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
   when: runner_sa_manifest.changed
 
-- name: Render ansible-runner deployment manifest
-  ansible.builtin.template:
-    src: deployment.yml.j2
-    dest: /tmp/k8s_manifests/ansible-runner-deployment.yml
-    mode: '0644'
-  register: runner_deploy_manifest
-
-- name: Apply ansible-runner deployment
-  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-deployment.yml
-  when: runner_deploy_manifest.changed
-
-- name: Wait for ansible-runner pod to be ready
+# The Deployment itself is deliberately NOT applied here. It lives in
+# manifests/ansible-runner/deployment.yml, which bootstrap_gitops syncs into
+# cluster-config, and ArgoCD (platform-ansible-runner) reconciles it with
+# prune+selfHeal. Applying it from Ansible as well meant two controllers
+# owning one object: Ansible would set the env block, ArgoCD would revert it
+# within seconds. This role now only provisions what ArgoCD cannot — the SSH
+# key Secret, which must never be committed to Git.
+#
+# Bootstrap ordering note: on a first run the Deployment appears only once
+# ArgoCD has synced cluster-config, so it is not ready when this role ends.
+- name: Wait for ansible-runner pod to be ready (once ArgoCD has created it)
   ansible.builtin.command: >
     kubectl wait --for=condition=available
     deployment/ansible-runner -n kube-system
     --timeout=120s
   changed_when: false
+  failed_when: false

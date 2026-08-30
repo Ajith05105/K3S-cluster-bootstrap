@@ -1,3 +1,13 @@
+# Managed by ArgoCD (platform-ansible-runner), NOT by Ansible.
+#
+# This path is synced into cluster-config and reconciled with prune+selfHeal,
+# so it must be plain YAML — ArgoCD cannot render Ansible variables. Per-site
+# values therefore come from the site-config ConfigMap, which
+# roles/platform_configmaps renders from all.yml. Nothing here is
+# environment-specific, so this file is portable to any cluster.
+#
+# Do not also apply this from Ansible: two controllers owning one object is
+# how the env block kept getting reverted.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,16 +35,37 @@ spec:
           image: localhost/ansible-runner:latest
           imagePullPolicy: Never
           env:
+
+            # If site-config is missing the pod stays in
+            # CreateContainerConfigError rather than starting. That is
+            # deliberate: a runner with an empty KUBE_VIP_VIP silently refuses
+            # every server join, which is far harder to notice than a pod that
+            # won't start.
+
             # Puts the VIP in a self-joined server's cert SANs (--tls-san),
-            # matching roles/k3s_server. Empty means the runner refuses server
-            # joins rather than creating a control-plane node the VIP can
-            # never cleanly fail over to.
+            # matching roles/k3s_server. Must agree with what the kube-vip
+            # DaemonSet advertises, or the VIP can never cleanly fail over to
+            # a node this runner joined.
             - name: KUBE_VIP_VIP
-              value: "{{ kube_vip_vip | default('') }}"
+              valueFrom:
+                configMapKeyRef:
+                  name: site-config
+                  key: kube_vip_vip
+
             # Self-joined agents never run node_prep, so this is the only way
             # they get a persistent time source.
             - name: NTP_SERVER
-              value: "{{ cluster_ntp_server | default(gateway_ip) }}"
+              valueFrom:
+                configMapKeyRef:
+                  name: site-config
+                  key: cluster_ntp_server
+
+            # Not environment-specific, so a literal is correct here. How
+            # often every registry entry is re-checked against reality —
+            # catches drift that produces no ConfigMap event, such as a
+            # re-flashed board, a failed provision, or a manual k3s-uninstall.
+            - name: RESYNC_INTERVAL
+              value: "300"
           volumeMounts:
             - name: ssh-key
               mountPath: /root/.ssh/ansible_runner_key

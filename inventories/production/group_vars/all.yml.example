@@ -1,52 +1,164 @@
-# Copy this file to all.yml and fill in your values
-# DO NOT commit all.yml to git — it is gitignored
+# Copy this file to all.yml and fill in your values:
+#
+#     cp inventories/production/group_vars/all.yml.example \
+#        inventories/production/group_vars/all.yml
+#
+# DO NOT commit all.yml — it is gitignored and holds your cluster secrets.
+#
+# Every variable below is REQUIRED unless marked optional. The playbooks fail
+# on an undefined variable rather than defaulting, so a missing entry here
+# surfaces as an error mid-run, not as a silently wrong cluster.
+#
+# ---------------------------------------------------------------------------
+# NETWORK LAYOUT
+#
+# The defaults below describe one coherent 192.168.1.0/24 layout. If your lab
+# uses a different subnet, change every address in the "Network" and "kube-vip"
+# sections together — they are not independent.
+#
+#   .1              gateway / NAT router (also the NTP server, see below)
+#   .60             control-plane VIP        (kube_vip_vip)
+#   .61 – .70       LoadBalancer pool        (kube_vip_lb_range_*)
+#   .100            bootstrap laptop         (you assign this by hand, see README)
+#   .101 – .199     in-cluster DHCP pool     (cluster_dhcp_range_*)   agents
+#   .200 – .254     bootstrap DHCP pool      (dhcp_range_*)           control plane
+#
+# The two DHCP pools MUST NOT overlap each other, and the LoadBalancer pool
+# MUST NOT contain kube_vip_vip — see the note in the kube-vip section.
+# ---------------------------------------------------------------------------
 
-# SSH authentication (key-based, no passwords)
-ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+# === SSH ===================================================================
+#
+# Two separate key pairs doing two different jobs. Both PUBLIC keys have to be
+# in each Pi's user-data at flash time (see README) — nothing in this repo
+# installs them for you.
+
+# Laptop → Pis. Used by Ansible itself, during bootstrap only.
+bootstrap_ssh_key: ~/.ssh/id_ed25519
+
+# In-cluster ansible-runner pod → new nodes, to join them to the cluster.
+# The private key is loaded into a Kubernetes Secret and never committed.
+# Generate the pair with:
+#     ssh-keygen -t ed25519 -f ~/.ssh/ansible_runner_key -N ""
+ansible_runner_private_key: ~/.ssh/ansible_runner_key
+ansible_runner_public_key: ~/.ssh/ansible_runner_key.pub
+
 ansible_user: pi
 
-# Cluster secret — used to join agents to the server
+# Plumbing — do not rename this one. Ansible's SSH connection plugin reads
+# this exact variable name and nothing else, so a custom name on its own is
+# silently ignored (which is what bootstrap_device_private_key was doing in
+# the old config). Edit bootstrap_ssh_key above; this just forwards it.
+ansible_ssh_private_key_file: "{{ bootstrap_ssh_key }}"
+
+
+# === k3s ===================================================================
+
+# Cluster join secret. Pick something random — this is what authorises a node
+# to join. Anything with this value can add itself to your control plane.
 k3s_token: changeme
 
-# Network — laptop interface connected to the Pi switch
+# Pinned k3s release. The binary and the air-gap image bundle are both
+# downloaded at this tag, so it must be a real k3s release tag.
+k3s_version: "v1.36.0+k3s1"
+
+
+# === Network — bootstrap ===================================================
+
+# The laptop interface plugged into the Pi switch. Find it with `ip a`
+# (Linux) or `ifconfig` (macOS). This is almost certainly a USB adapter.
 bootstrap_interface: en8
-bootstrap_interface_ip: 192.168.1.100
+
+# Temporary DHCP pool served by the laptop during prepare_nodes.yml only.
+# Control-plane nodes take their permanent static IPs from this range, so it
+# is "temporary" in the sense that the SERVER stops, not that the addresses
+# are short-lived.
 dhcp_range_start: 192.168.1.200
 dhcp_range_end: 192.168.1.254
+dhcp_lease_time: infinite
 subnet_mask: 255.255.255.0
+
+# Your LAN's real default route. Handed to nodes via netplan and advertised
+# by the in-cluster dnsmasq as DHCP option 3. Getting this wrong points every
+# node's default route at a k3s node, which blackholes the LAN.
 gateway_ip: 192.168.1.1
 
-# In-cluster dnsmasq — serves DHCP to agent nodes for the life of the
-# cluster. Deliberately a different range from the laptop's bootstrap DHCP
-# above, which only runs during prepare_nodes.yml.
+
+# === Network — in-cluster DHCP ==============================================
+
+# Pool served by the in-cluster dnsmasq for the life of the cluster. This is
+# what self-joining agent nodes get their addresses from. Deliberately a
+# different range from the bootstrap pool above.
 cluster_dhcp_range_start: 192.168.1.101
 cluster_dhcp_range_end: 192.168.1.199
 cluster_dhcp_lease_time: infinite
 
-# Advertised to DHCP clients as the NTP server (option 42). Self-joined
-# agents never run node_prep, so this is the only way they learn about a time
-# source. Run NTP off-cluster (e.g. on the NAT router Pi) so time keeps
-# working even when the cluster is down.
+# Advertised to DHCP clients as the NTP server (option 42), and written into
+# each node's systemd-timesyncd config. Self-joined agents never run
+# node_prep, so DHCP is the only way they learn about a time source.
+#
+# Run NTP OUTSIDE the cluster — the NAT-router Pi is the right place, with
+# chrony's `local stratum 10` set so it keeps serving when the internet is
+# down. An in-cluster NTP server would need correct time to bootstrap the
+# thing that provides correct time. Something must actually be listening at
+# this address; nothing here stands it up for you.
 cluster_ntp_server: 192.168.1.1
 
-# kube-vip
-kube_vip_version: "v0.9.0"
+
+# === kube-vip ===============================================================
+
+kube_vip_version: v1.2.1
+kube_vip_cloud_provider_version: "v0.0.12"
+
+# The interface kube-vip advertises the VIP on, as named ON THE PI (not on
+# your laptop). eth0 for a Pi 5's built-in ethernet.
 kube_vip_interface: eth0
-kube_vip_vip: 192.168.1.50
 
-# Helm (staged for the Pi during preflight)
-helm_version: "v3.21.3"
+# Highly-available control-plane VIP. Added to every server's serving cert as
+# a --tls-san, and ARP-advertised by the kube-vip DaemonSet.
+kube_vip_vip: 192.168.1.60
 
-# Gitea
-gitea_version: "1.24.3"
-gitea_chart_version: "12.5.0"
+# Pool that kube-vip-cloud-provider allocates LoadBalancer Service IPs from
+# (Traefik gets the first one). k3s is installed with --disable servicelb, so
+# without this every LoadBalancer Service sits at EXTERNAL-IP <pending>.
+#
+# This range MUST NOT include kube_vip_vip. Both are ARP-advertised by
+# kube-vip, so an overlap means two claimants for one address on the same L2
+# segment — which surfaces as the API server and Traefik intermittently
+# answering on each other's address.
+kube_vip_lb_range_start: 192.168.1.61
+kube_vip_lb_range_end: 192.168.1.70
+
+
+# === Pinned component versions ==============================================
+# Everything below is pulled or vendored during preflight.yml. Leave these
+# alone unless you are deliberately upgrading — the vendored Helm charts and
+# the saved image tarballs are matched to them.
+
+helm_version: v4.2.3
+
+
+# === Gitea ==================================================================
+# Gitea is both the git server and the container registry for the cluster.
+
+gitea_version: "1.26.4"
+gitea_chart_version: "12.6.0"
 gitea_admin_username: admin
+
+# Admin password for Gitea. Also the credential ArgoCD uses to pull images
+# and to clone the cluster-config repo, so changing it after deploy requires
+# re-running deploy_platform.yml.
 gitea_admin_password: changeme
 
-# ArgoCD
+
+# === ArgoCD =================================================================
+
 argocd_namespace: argocd
 argocd_version: "v3.4.5"
 argocd_chart_version: "10.1.3"
+
+# ArgoCD's bundled dependencies. Both are crane-pushed into Gitea's registry
+# during deploy so the cluster never needs live internet to pull them.
 dex_version: "v2.45.1"
 redis_version: "8.2.3-alpine"
-kube_vip_cloud_provider_version: "v0.0.12"

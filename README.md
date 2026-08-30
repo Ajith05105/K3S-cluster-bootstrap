@@ -59,7 +59,11 @@ In Raspberry Pi Imager, select:
 - OS: Ubuntu Server 24.04 LTS (64-bit)
 
 Under **Customisation**:
-- Hostname: include `server` in the name for control plane nodes (e.g. `server-1`, `server-2`). Anything else becomes a worker.
+- Hostname: **must declare its role explicitly** — `server-*` / `*-server` for
+  control plane, `agent-*` / `*-agent` for workers (e.g. `server-1`,
+  `agent-2`, `pi5-agent`). Anything else is **rejected**, not defaulted: the
+  runner refuses to guess, because guessing "worker" for an unrecognised host
+  is how a control-plane board — or your router — gets rebuilt as an agent.
 - Username: `pi` — must be `pi`, this is expected by the playbook
 - Skip WiFi
 
@@ -93,6 +97,17 @@ bootstrap_interface: enxa0cec892dc0f   # check with: ip a
 gateway_ip: 192.168.1.1                # your LAN's actual default route
 dhcp_range_start: 192.168.1.200
 dhcp_range_end: 192.168.1.254
+
+# In-cluster dnsmasq — serves DHCP to agents for the life of the cluster,
+# distinct from the laptop's temporary bootstrap range above.
+cluster_dhcp_range_start: 192.168.1.101
+cluster_dhcp_range_end: 192.168.1.199
+cluster_dhcp_lease_time: infinite
+
+# Handed to DHCP clients as the NTP server (option 42). Self-joined agents
+# never run node_prep, so this is the only way they learn about a time source.
+# Point it somewhere OUTSIDE the cluster — see Known Limitations.
+cluster_ntp_server: 192.168.1.1
 
 # kube-vip — HA control-plane VIP + LoadBalancer IP range
 kube_vip_interface: eth0
@@ -142,20 +157,52 @@ Once deployed, adding a new node requires zero manual steps — confirmed
 working in practice, not just in theory:
 
 1. Flash a new Pi — include both SSH keys in `user-data`
-2. Set hostname: anything without `server` in it → joins as an agent
+2. Set hostname to declare its role: `agent-*` or `*-agent`
 3. Plug into switch and power on
 
-The **lease-watcher** sidecar detects the new DHCP lease. The **ansible-runner**
-pod — a plain Python/paramiko script, despite the name, not literally
-Ansible — SSHes in and joins it to the cluster. Check logs:
+The **lease-watcher** sidecar detects the new DHCP lease and records it in the
+`worker-registry` ConfigMap. The **ansible-runner** pod — a plain
+Python/paramiko script, despite the name, not literally Ansible — SSHes in,
+sets the clock, copies the k3s artifacts, and joins it. Check logs:
 
 ```bash
 kubectl logs -n kube-system -l app=ansible-runner -f
 kubectl exec -n kube-system -l app=dnsmasq -- cat /var/lib/dnsmasq/dnsmasq.leases
 ```
 
-Currently handles new **agents** only — adding another control-plane node
-still goes through the manual `bootstrap_control_plane.yml` path.
+The runner is **level-triggered**, not purely event-driven: a DHCP lease gets
+picked up within seconds via the watch, and every `RESYNC_INTERVAL` (default
+300s) it re-checks *every* registry entry against reality. That second path is
+what catches drift that produces no event at all — a re-flashed board (same
+MAC, so lease-watcher correctly sees nothing new), a failed provision during a
+pod restart, a manual `k3s-uninstall`.
+
+Before provisioning it checks the cluster first (`is there already a Ready
+node with this name?`) and only falls back to SSH. Without that ordering, a
+node that happened to be mid-reboot when the resync fired would look
+unprovisioned and get reinstalled underneath itself.
+
+> **Re-flashing an existing node needs one manual step.** k3s binds a hostname
+> to a random node password — the machine keeps it in
+> `/etc/rancher/node/password`, the server keeps a hash in a Secret. Wiping the
+> SD card destroys the machine's half, so registration is refused with
+> `Node password rejected` and k3s-agent retries forever. That's k3s's
+> anti-hostname-squatting protection working correctly; it can't tell a
+> legitimate rebuild from an impostor. The runner **detects** this and logs the
+> fix, but deliberately won't do it itself — clearing the record is an operator
+> decision, not a standing permission for an unattended pod:
+> ```bash
+> kubectl delete node agent-1     # the node-password Secret cascades with it
+> ```
+> Do that before or after re-flashing; k3s-agent retries on its own, so the
+> node joins once the record is gone. Flashing under a *new* hostname avoids
+> the whole issue, at the cost of leaving a dead node object behind.
+
+Control-plane auto-join exists in the runner (hostname `server-*`, gated on
+every existing control-plane node being `Ready`, joined with `--tls-san` for
+the VIP, one per cycle so etcd can settle) but is **not yet exercised** — the
+tested path for adding a control-plane node is still
+`bootstrap_control_plane.yml`.
 
 ## GitOps & Platform Services
 
@@ -218,7 +265,7 @@ insecure = true
 
 # docker: /etc/docker/daemon.json
 { "insecure-registries": ["gitea.cluster.local"] }
-```
+````
 
 ## Multi-Tenant Security Model
 
@@ -290,10 +337,12 @@ committed, same pattern ArgoCD itself uses for its own admin password.
 
 ## Known Limitations
 
-- Joining additional control-plane nodes still uses server-1's raw IP, not kube-vip's VIP — true HA join isn't wired up yet, even though kube-vip itself is running and serving LoadBalancer IPs correctly.
+- Joining additional control-plane nodes via `bootstrap_control_plane.yml` still uses server-1's raw IP, not kube-vip's VIP — true HA join isn't wired up on that path, even though kube-vip is running and serving LoadBalancer IPs correctly. (The `ansible-runner` control-plane path *does* join via the VIP, but is untested — see Self-Healing Agent Join.)
+- `gitea.cluster.local` resolves via an `/etc/hosts` entry written on each node, with Gitea's ClusterIP baked into `registries.yaml` at deploy time. Image pulls happen in containerd on the node, which doesn't use CoreDNS, so the in-cluster service name isn't usable there. The consequence: if Gitea's Service is ever recreated it gets a new ClusterIP, and every node silently points at a dead address until `configure_registry` runs again. Nothing detects this.
 - ArgoCD and Gitea are both served over plain HTTP, no TLS. Deliberate for now, not an oversight — this is a physically access-controlled LAN, not a publicly exposed service, and self-signed certs would add complexity without a real threat they'd defend against here. Worth revisiting with cert-manager + an internal CA if that changes.
 - Kubernetes Secrets in etcd are base64-encoded, not encrypted at rest (k3s's default). Every credential this project generates — tenant passwords included — lives there. Enabling `--secrets-encryption` needs reinstalling k3s server-side, so it's a real, separate task, not a quick patch.
-- No persistent NTP. Node clocks drift on every reboot (no RTC on these Pis) and nothing auto-corrects it — this has caused real, repeated failures during development. An in-cluster NTP server is planned; running it on the NAT-router Pi instead of inside Kubernetes would be more robust, since it sidesteps the cluster needing correct time to bootstrap the very thing that would give it correct time.
+- **Time is the single most load-bearing dependency in this project, and it still isn't fully solved.** Nodes are now pointed at `cluster_ntp_server` (via `node_prep`, via `ansible-runner` for self-joined agents, and via DHCP option 42), with `systemd-timesyncd` enabled so it survives reboots — but *something has to actually serve NTP at that address*, and standing that up is still on you. Run it **outside** the cluster (the NAT-router Pi), with chrony's `local stratum 10` set so it keeps serving when the internet is down; an in-cluster NTP server would need correct time to bootstrap the thing that provides correct time. Why this matters more than it sounds: a wrong clock doesn't look like a clock problem. It surfaces as TLS failures, ServiceAccount tokens rejected as "not yet valid", agents stuck in `activating`, and API 401s — every symptom pointing somewhere other than the cause. Two control-plane nodes once sat 23 days in the past for three weeks, silently taking the node-join pipeline down with them.
+- **The Pi 5's RTC has no battery by default**, so every reboot starts from whatever stale timestamp systemd last saved. `hwclock -w` is already called during provisioning and becomes genuinely useful the moment a battery is fitted — a few dollars, and it closes the reboot gap even with NTP unreachable.
 - A tenant's Gitea login password and the credential ArgoCD uses to keep syncing their repo are currently the same value. Decoupling these (a separate access token for ArgoCD) would let a tenant change their own password without silently breaking their sync — not done yet.
 - The `ApplicationSet` that generates tenants polls Git on its own ~3 minute timer, separate from a normal Application's refresh. A new or edited tenant can take a few minutes to actually take effect. A Gitea webhook would close this gap if onboarding speed ever matters.
 - No backup/snapshot mechanism yet for Gitea's PVC (repos + registry data) — local-path storage, single node, no redundancy. Real HA is likely not worth the complexity here (Gitea's SQLite backend is single-writer regardless); a periodic backup is the right-sized fix and is planned.

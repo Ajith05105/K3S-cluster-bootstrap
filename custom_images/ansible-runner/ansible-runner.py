@@ -23,6 +23,11 @@ KUBE_VIP_VIP = os.environ.get("KUBE_VIP_VIP", "").strip()
 # this is the only place they get a persistent time source.
 NTP_SERVER = os.environ.get("NTP_SERVER", "").strip()
 
+# How often to re-check every registry entry against reality. Lower means
+# drift (re-flashed board, dead node, failed provision) is noticed sooner, at
+# the cost of more SSH probes per node per hour.
+RESYNC_INTERVAL = int(os.environ.get("RESYNC_INTERVAL", "300"))
+
 # Paths on the control plane node (mounted into container via hostPath)
 K3S_BINARY_PATH = "/usr/local/bin/k3s"
 K3S_INSTALL_SCRIPT_PATH = "/home/pi/k3s-install.sh"
@@ -129,6 +134,24 @@ def parse_workers(cm):
     return workers
 
 
+def node_is_ready(api, hostname):
+    """Is there already a Ready node with this name in the cluster?
+
+    This is the authoritative answer to "is this a working member", and it is
+    checked before the SSH probe below. Without it, a node that happens to be
+    mid-reboot when the resync fires looks unprovisioned over SSH and would be
+    reinstalled underneath itself.
+    """
+    try:
+        node = api.read_node(name=hostname)
+    except Exception:
+        return False
+    for condition in (node.status.conditions or []):
+        if condition.type == "Ready":
+            return condition.status == "True"
+    return False
+
+
 def is_provisioned(ip, role):
     unit = "k3s" if role == "server" else "k3s-agent"
     try:
@@ -147,7 +170,42 @@ def is_provisioned(ip, role):
         return False
 
 
-def provision(worker, server_url, token, role):
+def warn_if_stale_node_record(api, ssh, hostname):
+    """Detect a re-flashed board whose server-side identity is now stale.
+
+    k3s pairs a hostname with a random node password: the machine keeps it in
+    /etc/rancher/node/password, the server keeps a hash in the Secret
+    <hostname>.node-password.k3s. Re-flashing destroys the machine's half; the
+    server's half survives, so registration is refused with "Node password
+    rejected" and k3s-agent sits in "activating" forever.
+
+    Deliberately log-only. Clearing the record means overriding k3s's
+    anti-hostname-squatting check — that is a deliberate operator action, not
+    a standing permission for an unattended pod, so this only tells you the
+    exact command to run.
+    """
+    try:
+        api.read_node(name=hostname)
+    except Exception:
+        return  # no node object for this name — nothing stale
+
+    _, stdout, _ = ssh.exec_command(
+        "test -f /etc/rancher/node/password && echo yes || echo no"
+    )
+    if stdout.read().decode().strip() != "no":
+        return  # machine still holds its half of the pair — consistent
+
+    print(
+        f"WARNING {hostname}: the cluster has a node record, but this machine "
+        f"has no node identity — it looks re-flashed. k3s will install, then "
+        f"registration will be REJECTED until the stale record is cleared:\n"
+        f"    kubectl delete node {hostname}\n"
+        f"    (the node-password Secret is removed with it)\n"
+        f"k3s-agent retries on its own, so the node joins once that is done."
+    )
+
+
+def provision(api, worker, server_url, token, role):
     ip = worker["ip"]
     hostname = worker["hostname"]
     print(f"Provisioning {hostname} ({ip}) as {role}...")
@@ -158,6 +216,10 @@ def provision(worker, server_url, token, role):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(ip, username=SSH_USER, pkey=key, timeout=10)
 
+        # Pre-flight: surface a stale node record before doing the work, so
+        # the reason for a later registration failure is already in the log.
+        warn_if_stale_node_record(api, ssh, hostname)
+
         # 0. Sync time — critical for TLS cert validation.
         #    Seed from this pod's clock so the join works right now, then hand
         #    the node over to NTP. Seeding alone is what the old code did, and
@@ -166,10 +228,17 @@ def provision(worker, server_url, token, role):
         #    and the node silently falls out of the cluster's cert validity
         #    window with no way back.
         print(f"Syncing time on {hostname}...")
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # UTC explicitly on both sides. `date -s` interprets a bare timestamp
+        # in the TARGET's local timezone, but this pod's clock is UTC — so
+        # sending a UTC value unqualified landed every node off by its UTC
+        # offset (12h on Pacific/Auckland). The node then failed TLS
+        # validation and sat in "activating" forever.
+        # set-ntp false first because systemd refuses manual time changes
+        # while it is managing the clock; the NTP block below re-enables it.
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         _, stdout, stderr = ssh.exec_command(
             f"sudo timedatectl set-ntp false && "
-            f"sudo date -s '{now}' && "
+            f"sudo date -u -s '{now}' && "
             f"sudo hwclock -w 2>/dev/null || true"
         )
         _ = stdout.read()
@@ -273,6 +342,11 @@ def process_workers(api, cm, server_url, token):
             print(f"Skipping {hostname} ({worker['ip']}): {e}")
             continue
 
+        # Cluster state first (cheap, authoritative), SSH only as a fallback
+        # for "is there even k3s on this box" — e.g. a re-flashed board, which
+        # keeps its MAC so it never looks new to lease-watcher.
+        if node_is_ready(api, hostname):
+            continue
         if is_provisioned(worker["ip"], role):
             continue
 
@@ -283,17 +357,25 @@ def process_workers(api, cm, server_url, token):
                 continue
             if not control_plane_is_healthy(api):
                 continue
-            provision(worker, server_url, token, role)
+            provision(api, worker, server_url, token, role)
             # One control-plane join per cycle. The new member has to register
             # and go Ready before control_plane_is_healthy() can give a
             # meaningful answer about whether it's safe to add another.
             print("Server join attempted — pausing this cycle so etcd settles.")
             return
 
-        provision(worker, server_url, token, role)
+        provision(api, worker, server_url, token, role)
 
 
 def reconcile(api, server_url, token):
+    """Level-triggered sweep: bring every registry entry to desired state.
+
+    Runs on a timer rather than only at startup, because plenty of drift
+    produces no ConfigMap event at all — a re-flashed board (same MAC, so
+    lease-watcher correctly sees nothing new), a failed provision during a pod
+    restart, a manual k3s-uninstall, a dead disk. The watch below is only a
+    latency optimisation on top of this.
+    """
     print("Reconciling existing workers...")
     try:
         cm = api.read_namespaced_config_map(
@@ -302,7 +384,7 @@ def reconcile(api, server_url, token):
         )
         process_workers(api, cm, server_url, token)
     except Exception as e:
-        print(f"Reconciliation error on startup: {e}")
+        print(f"Reconciliation error: {e}")
     print("Reconciliation complete.")
 
 
@@ -315,18 +397,20 @@ def main():
     print(f"Control plane: {server_url}")
     print(f"kube-vip VIP: {KUBE_VIP_VIP or '(unset — server joins disabled)'}")
 
-    # 1. Reconcile on startup — catch nodes added before ansible-runner deployed
-    reconcile(api, server_url, token)
-
-    # 2. Watch for new entries — resilient against stream timeouts
-    print("Watching worker-registry for new nodes...")
+    print(f"Watching worker-registry (resync every {RESYNC_INTERVAL}s)...")
     w = watch.Watch()
     while True:
         try:
+            # Level-triggered: sweep everything, then watch for changes until
+            # the stream times out and drops us back here. New hardware is
+            # picked up in seconds by the watch; anything that drifted without
+            # producing an event is caught by the next sweep.
+            reconcile(api, server_url, token)
             for event in w.stream(
                 api.list_namespaced_config_map,
                 namespace=NAMESPACE,
-                field_selector=f"metadata.name={WORKER_CONFIGMAP}"
+                field_selector=f"metadata.name={WORKER_CONFIGMAP}",
+                timeout_seconds=RESYNC_INTERVAL,
             ):
                 if event["type"] in ["ADDED", "MODIFIED"]:
                     process_workers(api, event["object"], server_url, token)

@@ -1,21 +1,47 @@
 ---
+# Ownership note: nothing in this role writes to
+# /var/lib/rancher/k3s/server/manifests/ any more.
+#
+# That directory is reconciled by k3s's own addon controller, which meant the
+# DaemonSet, RBAC and cloud-controller each had TWO reconcilers — k3s from the
+# file, and ArgoCD (platform-kube-vip) from the same three files in
+# manifests/kube-vip/. It also made the objects silently un-editable: kubectl
+# patch and kubectl rollout restart both appeared to succeed and were reverted
+# seconds later with no event.
+#
+# Now: Ansible applies the static manifests here so kube-vip exists during
+# bootstrap (ArgoCD does not exist yet at this point), and ArgoCD adopts the
+# identical files later. Same bytes from one source, so adoption is a no-op —
+# the pattern already proven by deploy_dnsmasq.
+#
+# The one object Ansible owns outright is the range ConfigMap, because it is
+# rendered from all.yml and ArgoCD cannot render Jinja.
+
 - name: Copy kube-vip image tar to server
   ansible.builtin.copy:
     src: /tmp/k3s-images/kube-vip.tar
     dest: "/home/{{ ansible_user }}/kube-vip.tar"
     mode: '0644'
 
-- name: Ensure K3s manifests directory exists
+# This role runs during bootstrap_control_plane.yml, before
+# platform_configmaps creates this directory — so create it here rather than
+# depending on play ordering.
+- name: Ensure manifest staging directory exists
   ansible.builtin.file:
-    path: /var/lib/rancher/k3s/server/manifests
+    path: /tmp/k8s_manifests
     state: directory
-    mode: '0755'
+    mode: '0700'
 
-- name: Copy kube-vip RBAC manifest to K3s auto-deploy directory
+- name: Stage kube-vip RBAC manifest
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/kube-vip/kube-vip-rbac.yaml"
-    dest: /var/lib/rancher/k3s/server/manifests/kube-vip-rbac.yaml
-    mode: '0644'
+    dest: /tmp/k8s_manifests/kube-vip-rbac.yaml
+    mode: '0600'
+
+- name: Apply kube-vip RBAC
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/kube-vip-rbac.yaml
+  register: kube_vip_rbac_apply
+  changed_when: "'unchanged' not in kube_vip_rbac_apply.stdout"
 
 - name: Import kube-vip image into containerd k8s.io namespace
   ansible.builtin.command: >
@@ -23,29 +49,26 @@
     --namespace k8s.io
     images import /home/{{ ansible_user }}/kube-vip.tar
 
-- name: Copy kube-vip DaemonSet manifest to K3s auto-deploy directory
+- name: Stage kube-vip DaemonSet manifest
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/kube-vip/kube-vip-daemonset.yaml"
-    dest: /var/lib/rancher/k3s/server/manifests/kube-vip.yaml
-    mode: '0644'
+    dest: /tmp/k8s_manifests/kube-vip-daemonset.yaml
+    mode: '0600'
 
-- name: Wait for kube-vip DaemonSet resource to exist
-  ansible.builtin.command: >
-    kubectl get daemonset kube-vip-ds -n kube-system
-  become: true
-  register: kube_vip_ds_check
-  until: kube_vip_ds_check.rc == 0
-  retries: 15
-  delay: 2
-  changed_when: false
+- name: Apply kube-vip DaemonSet
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/kube-vip-daemonset.yaml
+  register: kube_vip_ds_apply
+  changed_when: "'unchanged' not in kube_vip_ds_apply.stdout"
 
+# No "wait for the DaemonSet to exist" loop any more — kubectl apply is
+# synchronous, so it exists by the time the task above returns. That loop only
+# existed because k3s created it asynchronously from a file.
 - name: Wait for kube-vip DaemonSet pods to be ready
   ansible.builtin.command: >
     kubectl wait --for=condition=ready pod
     -n kube-system
     -l app.kubernetes.io/name=kube-vip-ds
     --timeout=120s
-  become: true
   changed_when: false
   ignore_errors: true
 
@@ -56,33 +79,49 @@
 # turns off k3s's own built-in LB controller, without this, every
 # LoadBalancer Service sits at EXTERNAL-IP <pending> forever.
 
-- name: Copy kube-vip-cloud-provider manifest to K3s auto-deploy directory
+- name: Stage kube-vip-cloud-provider manifest
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/kube-vip/kube-vip-cloud-controller.yaml"
-    dest: /var/lib/rancher/k3s/server/manifests/kube-vip-cloud-controller.yaml
-    mode: '0644'
+    dest: /tmp/k8s_manifests/kube-vip-cloud-controller.yaml
+    mode: '0600'
 
-- name: Generate and place kube-vip LoadBalancer IP range ConfigMap
+- name: Apply kube-vip-cloud-provider
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/kube-vip-cloud-controller.yaml
+  register: cloud_provider_apply
+  changed_when: "'unchanged' not in cloud_provider_apply.stdout"
+
+# The cloud provider's only config input. It must be a ConfigMap named exactly
+# 'kubevip' in kube-system — that name is kube-vip's contract, not ours, which
+# is why these values cannot just live in site-config.
+- name: Generate kube-vip LoadBalancer IP range ConfigMap
   ansible.builtin.template:
     src: kubevip-range-configmap.yaml.j2
-    dest: /var/lib/rancher/k3s/server/manifests/kubevip-range-configmap.yaml
-    mode: '0644'
+    dest: /tmp/k8s_manifests/kubevip-range-configmap.yaml
+    mode: '0600'
 
-- name: Wait for kube-vip-cloud-provider deployment to exist
+- name: Apply kube-vip LoadBalancer IP range ConfigMap
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/kubevip-range-configmap.yaml
+  register: kubevip_range_apply
+  changed_when: "'unchanged' not in kubevip_range_apply.stdout"
+
+# The range is what decides whether LoadBalancer Services ever get an address,
+# so assert it landed rather than trusting the apply. A range that silently
+# disagrees with all.yml is how the VIP and Traefik ended up sharing an
+# address.
+- name: Verify the applied LoadBalancer range matches all.yml
   ansible.builtin.command: >
-    kubectl get deployment kube-vip-cloud-provider -n kube-system
-  become: true
-  register: cloud_provider_deploy_check
-  until: cloud_provider_deploy_check.rc == 0
-  retries: 15
-  delay: 2
+    kubectl get configmap kubevip -n kube-system
+    -o jsonpath={.data.range-global}
+  register: applied_range
   changed_when: false
+  failed_when: >
+    applied_range.stdout !=
+    kube_vip_lb_range_start ~ '-' ~ kube_vip_lb_range_end
 
 - name: Wait for kube-vip-cloud-provider to be ready
   ansible.builtin.command: >
     kubectl wait --for=condition=available
     deployment/kube-vip-cloud-provider -n kube-system
     --timeout=120s
-  become: true
   changed_when: false
   ignore_errors: true
