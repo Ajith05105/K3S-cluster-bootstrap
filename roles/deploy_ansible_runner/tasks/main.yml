@@ -8,12 +8,15 @@
   changed_when: false
   failed_when: false
 
+# no_log is mandatory here: without it `ansible-playbook --diff` prints the
+# whole private key to the terminal.
 - name: Copy ansible-runner private key to server
   ansible.builtin.copy:
     src: "{{ ansible_runner_private_key }}"
     dest: /tmp/ansible_runner_key
     mode: '0600'
   when: secret_check.stdout == ""
+  no_log: true
 
 - name: Create ansible-runner SSH key secret
   ansible.builtin.command: >
