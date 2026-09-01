@@ -50,6 +50,12 @@
         path: "/tmp/k3s-images/ansible-runner.tar"
       register: runner_tar
 
+    # NEW tonight.
+    - name: Check if gitea-runner tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/gitea-runner.tar"
+      register: gitea_runner_tar
+
     - name: Check if kube-vip tar exists
       ansible.builtin.stat:
         path: "/tmp/k3s-images/kube-vip.tar"
@@ -98,6 +104,7 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+          or not gitea_runner_tar.stat.exists
           or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
           or not gitea_tar.stat.exists
 
@@ -139,6 +146,21 @@
         podman save localhost/ansible-runner:latest
         -o /tmp/k3s-images/ansible-runner.tar
       when: not runner_tar.stat.exists
+
+    # NEW tonight.
+    - name: Build gitea-runner image
+      ansible.builtin.command: >
+        podman build
+        --platform linux/arm64
+        -t gitea-runner:latest
+        {{ playbook_dir }}/../custom_images/gitea-runner/
+      when: not gitea_runner_tar.stat.exists
+
+    - name: Save gitea-runner image
+      ansible.builtin.command: >
+        podman save localhost/gitea-runner:latest
+        -o /tmp/k3s-images/gitea-runner.tar
+      when: not gitea_runner_tar.stat.exists
 
     - name: Pull kube-vip image for arm64
       ansible.builtin.command: >
@@ -356,5 +378,6 @@
       when:
         - ansible_facts['os_family'] == 'Darwin'
         - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
+          or not gitea_runner_tar.stat.exists
           or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
           or not gitea_tar.stat.exists

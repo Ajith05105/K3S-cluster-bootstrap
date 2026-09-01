@@ -54,3 +54,9 @@ gitea:
       REQUIRE_SIGNIN_VIEW: true
     packages:
       ENABLED: true
+    # NEW: this is the only change in this file. Turns on Gitea Actions
+    # server-side (the API/UI/webhook dispatch for it) — it does nothing on
+    # its own without a runner registered against it, which is what
+    # manifests/gitea-runner/ + roles/deploy_gitea_runner provide.
+    actions:
+      ENABLED: true

@@ -41,6 +41,16 @@
     dest: "{{ k3s_airgap_images_dir }}/ansible-runner.tar"
     mode: '0644'
 
+# NEW tonight. Dropping this tar into the same airgap-images directory is
+# the whole mechanism — k3s scans this directory itself and imports
+# anything it finds, the same reason nothing here runs `ctr images import`
+# or `podman load` explicitly for dnsmasq/ansible-runner either.
+- name: Copy gitea-runner image
+  copy:
+    src: /tmp/k3s-images/gitea-runner.tar
+    dest: "{{ k3s_airgap_images_dir }}/gitea-runner.tar"
+    mode: '0644'
+
 
 - name: Copy gitea image tar to server
   ansible.builtin.copy:

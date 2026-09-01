@@ -90,6 +90,39 @@ def get_control_plane_url(api):
     raise Exception("No control plane node found")
 
 
+def get_gitea_cluster_ip(api):
+    """Gitea's ClusterIP — same value roles/configure_registry reads via
+    `kubectl get svc gitea-http -n gitea`, fetched here via the API client
+    already in hand instead of shelling out.
+
+    Raises if the Service doesn't exist yet (e.g. very first boot, before
+    deploy_gitea has run) — callers use resolve_gitea_ip() below rather than
+    calling this directly, precisely so that case degrades registry-trust
+    config, not node joining itself.
+    """
+    svc = api.read_namespaced_service(name="gitea-http", namespace="gitea")
+    return svc.spec.cluster_ip
+
+
+def resolve_gitea_ip(api):
+    """Best-effort wrapper around get_gitea_cluster_ip(). Never raises.
+
+    Node joining has to keep working even when Gitea isn't deployed yet —
+    that dependency doesn't exist today and this change shouldn't introduce
+    one. Worst case on failure: a node provisioned this cycle doesn't get
+    registries.yaml written and ImagePullBackOffs if a pod later lands there,
+    which is visible and gets retried next RESYNC_INTERVAL (see the call site
+    in provision()) — not silent, and not fatal to the join itself.
+    """
+    try:
+        return get_gitea_cluster_ip(api)
+    except Exception as e:
+        print(f"Could not resolve Gitea's ClusterIP this cycle ({e}) — "
+              "registry trust config will be skipped for any node "
+              "provisioned this cycle; node joining itself is unaffected.")
+        return ""
+
+
 def control_plane_is_healthy(api):
     """Pre-flight check before adding a control-plane (etcd voting) member.
 
@@ -205,7 +238,7 @@ def warn_if_stale_node_record(api, ssh, hostname):
     )
 
 
-def provision(api, worker, server_url, token, role):
+def provision(api, worker, server_url, token, role, gitea_ip):
     """Provision one node. Returns True only if k3s installed successfully.
 
     The caller relies on this: a failed server join must not be mistaken for a
@@ -247,8 +280,6 @@ def provision(api, worker, server_url, token, role):
             f"sudo hwclock -w 2>/dev/null || true"
         )
         _ = stdout.read()
-        _ = stderr.read()
-        stdout.channel.recv_exit_status()
 
         if NTP_SERVER:
             _, stdout, stderr = ssh.exec_command(
@@ -322,6 +353,58 @@ def provision(api, worker, server_url, token, role):
 
         if exit_code == 0:
             print(f"Successfully provisioned {hostname} as {role}")
+
+            # NEW tonight. Mirrors what roles/configure_registry writes for
+            # the static server-1/2/3 inventory. Any node that joins through
+            # THIS script — any self-joined agent, and (per get_role()) any
+            # self-joined server — never runs that role, since it only ever
+            # targets the static `hosts: server` group. Without this, a pod
+            # the scheduler places here pulls from gitea.cluster.local:3000
+            # and fails closed with ImagePullBackOff, for a reason that looks
+            # nothing like a registry problem from the tenant's side.
+            if gitea_ip:
+                print(f"Configuring registry trust on {hostname}...")
+                # A heredoc over the SSH channel, not printf — the config
+                # needs literal double-quoted YAML keys (see
+                # roles/configure_registry for the same content built via
+                # Ansible's `copy` module instead, which has no shell
+                # involved at all). A quoted heredoc delimiter sends these
+                # bytes to the remote shell verbatim, with no escaping
+                # round-trip to get wrong.
+                registries_yaml = (
+                    "mirrors:\n"
+                    '  "gitea.cluster.local:3000":\n'
+                    "    endpoint:\n"
+                    f'      - "http://{gitea_ip}:3000"\n'
+                    "configs:\n"
+                    '  "gitea.cluster.local:3000":\n'
+                    "    tls:\n"
+                    "      insecure_skip_verify: true\n"
+                )
+                agent_unit = "k3s" if role == "server" else "k3s-agent"
+                registry_cmd = (
+                    "sudo mkdir -p /etc/rancher/k3s && "
+                    "sudo tee /etc/rancher/k3s/registries.yaml > /dev/null << 'REGISTRIES_EOF'\n"
+                    f"{registries_yaml}"
+                    "REGISTRIES_EOF\n"
+                    f"sudo systemctl restart {agent_unit}"
+                )
+                _, stdout, stderr = ssh.exec_command(registry_cmd)
+                _ = stdout.read()
+                registry_err = stderr.read().decode().strip()
+                if stdout.channel.recv_exit_status() != 0:
+                    # Deliberately non-fatal: the node already joined and is
+                    # Ready. A tenant pod that never lands here is
+                    # unaffected; one that does will ImagePullBackOff
+                    # visibly, not silently, and is_provisioned() will still
+                    # see this node as provisioned so this block alone
+                    # re-runs next RESYNC_INTERVAL rather than the whole join.
+                    print(f"WARNING {hostname}: registry trust config failed, "
+                          f"will retry next reconcile: {registry_err}")
+            else:
+                print(f"Skipping registry trust config on {hostname}: "
+                      "Gitea's ClusterIP wasn't resolvable this cycle.")
+
             # The k3s binary was already moved into place by step 2, so only
             # the install-script wrapper needs cleaning up.
             ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
@@ -340,7 +423,7 @@ def provision(api, worker, server_url, token, role):
         return False
 
 
-def process_workers(api, cm, server_url, token):
+def process_workers(api, cm, server_url, token, gitea_ip):
     # At most one control-plane join per cycle — but a FAILED attempt must not
     # consume that slot, and must not stop agents being processed. This used to
     # `return` unconditionally after any server attempt, so a single
@@ -375,7 +458,7 @@ def process_workers(api, cm, server_url, token):
                 continue
             if not control_plane_is_healthy(api):
                 continue
-            if provision(api, worker, server_url, token, role):
+            if provision(api, worker, server_url, token, role, gitea_ip):
                 # A real member joined. It has to register and go Ready before
                 # control_plane_is_healthy() can answer meaningfully about
                 # adding another, so no further server joins this cycle.
@@ -384,7 +467,7 @@ def process_workers(api, cm, server_url, token):
                       "so etcd settles.")
             continue
 
-        provision(api, worker, server_url, token, role)
+        provision(api, worker, server_url, token, role, gitea_ip)
 
 
 def reconcile(api, server_url, token):
@@ -397,12 +480,13 @@ def reconcile(api, server_url, token):
     latency optimisation on top of this.
     """
     print("Reconciling existing workers...")
+    gitea_ip = resolve_gitea_ip(api)
     try:
         cm = api.read_namespaced_config_map(
             name=WORKER_CONFIGMAP,
             namespace=NAMESPACE
         )
-        process_workers(api, cm, server_url, token)
+        process_workers(api, cm, server_url, token, gitea_ip)
     except Exception as e:
         print(f"Reconciliation error: {e}")
     print("Reconciliation complete.")
@@ -433,7 +517,8 @@ def main():
                 timeout_seconds=RESYNC_INTERVAL,
             ):
                 if event["type"] in ["ADDED", "MODIFIED"]:
-                    process_workers(api, event["object"], server_url, token)
+                    process_workers(api, event["object"], server_url, token,
+                                     resolve_gitea_ip(api))
         except Exception as e:
             # A 401 here means the projected ServiceAccount token rotated and
             # the cached credential went stale. Rebuild the client instead of

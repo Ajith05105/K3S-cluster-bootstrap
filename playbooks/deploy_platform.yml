@@ -6,6 +6,7 @@
     - platform_configmaps
     - deploy_dnsmasq
     - deploy_ansible_runner
+    - deploy_gitea_runner
     - deploy_gitea
 
 - name: Configure container registry mirror on all nodes

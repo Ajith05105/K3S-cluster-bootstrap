@@ -144,3 +144,68 @@
   delay: 5
   no_log: true
   changed_when: true
+
+# --- Everything below is NEW tonight -----------------------------------
+#
+# Both tasks run unconditionally (no `when: tenant_repo_check.status == 404`)
+# so that re-running sync_tenants.yml also backfills the tenants that were
+# already onboarded before tonight (ajith, alice, demo, emilio, isaac,
+# verify, william) — not just tenants created from here on.
+
+- name: "{{ this_tenant }}: register their Gitea password as an Actions secret on their repo"
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/repos/{{ this_tenant }}/app/actions/secrets/REGISTRY_PASSWORD"
+    method: PUT
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      data: "{{ tenant_password }}"
+    status_code: [201, 204]
+  no_log: true
+  # This is what lets build-and-deploy.yaml (shipped via the starter kit)
+  # authenticate as the tenant to push to their own registry namespace and
+  # git-push its own tag-bump commit — reusing the same account/password
+  # onboarding already generates rather than minting yet another credential.
+  # A PUT is create-or-update, so this is safe to run on every sync.
+  #
+  # If this 404s, or the workflow can't use REGISTRY_PASSWORD at job time:
+  # Gitea's own API docs for this endpoint are inconsistent about whether
+  # `data` wants the raw value or a base64-encoded one, and it wasn't
+  # practical to verify against a live 1.26.4 instance ahead of time. Try
+  # raw first (this task assumes raw); if the workflow's buildah login fails
+  # with a garbled-looking credential, base64-encode tenant_password before
+  # sending it instead.
+
+- name: "{{ this_tenant }}: check if their repo already has the CI workflow"
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/repos/{{ this_tenant }}/app/contents/.gitea/workflows/build-and-deploy.yaml"
+    method: GET
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: tenant_workflow_check
+  no_log: true
+
+- name: "{{ this_tenant }}: push the CI workflow to their repo"
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/repos/{{ this_tenant }}/app/contents/.gitea/workflows/build-and-deploy.yaml"
+    method: POST
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      message: "ci: add build-and-deploy workflow"
+      branch: main
+      content: "{{ lookup('ansible.builtin.file', role_path + '/../../manifests/tenant-onboarding-kit/templates/.gitea/workflows/build-and-deploy.yaml') | b64encode }}"
+    status_code: [201]
+  when: tenant_workflow_check.status == 404
+  no_log: true
+  # Only fires when the file is genuinely missing (brand-new tenants already
+  # got it via the starter-chart push above, so this is a no-op for them —
+  # it's specifically the backfill path for the six tenants that predate
+  # this file existing). Deliberately never overwrites: if a tenant has
+  # since edited their own workflow, this leaves it alone.

@@ -151,6 +151,27 @@ gitea_admin_username: admin
 # re-running deploy_platform.yml.
 gitea_admin_password: changeme
 
+# NEW. Registration token for the in-cluster Gitea Actions runner (see
+# manifests/gitea-runner/, roles/deploy_gitea_runner) — this is what lets
+# tenants deploy via `git push` instead of building and pushing images by
+# hand. One-time manual step to get this value, same category as generating
+# ansible_runner_key above with ssh-keygen — not a recurring manual step, and
+# not SSH:
+#
+#   1. Open http://gitea.cluster.local:3000/-/admin/actions/runners
+#   2. Click "Create new Runner"
+#   3. Paste the token it shows you here.
+#
+# Worth trying first, since it may save that click: `gitea actions
+# generate-runner-token` run inside the gitea pod, or POST
+# /api/v1/admin/actions/runners/registration-token against the Gitea API.
+# Both are known to be unreliable on some Gitea versions for INSTANCE-level
+# tokens specifically (see go-gitea/gitea#34664) — if the runner logs
+# "runner registration token not found" after registering with a token from
+# either of those, that's this bug, and the admin-UI token above is the
+# fallback that always works.
+gitea_runner_registration_token: changeme
+
 
 # === ArgoCD =================================================================
 
