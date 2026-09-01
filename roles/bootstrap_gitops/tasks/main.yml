@@ -52,7 +52,7 @@
     rsync -a --no-g --no-o --delete
     --exclude=argocd/argo-cd
     --exclude=gitea/gitea
-    -e ssh
+    -e "ssh -p {{ ansible_port | default(22) }}"
     {{ role_path }}/../../manifests/
     {{ ansible_user }}@{{ ansible_host }}:/home/{{ ansible_user }}/cluster-config-push/
   delegate_to: localhost
@@ -170,6 +170,16 @@
 - name: Derive tenant names from declaration filenames
   ansible.builtin.set_fact:
     tenant_names: "{{ tenant_declarations.files | map(attribute='path') | map('basename') | map('regex_replace', '\\.yaml$', '') | list }}"
+- name: Ensure every declared tenant's app hostname resolves locally
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '{{ item }}\.apps\.cluster\.local'
+    line: "{{ kube_vip_lb_range_start }} {{ item }}.apps.cluster.local"
+    state: present
+  become: true
+  delegate_to: localhost
+  loop: "{{ tenant_names }}"
+
 
 - name: Onboard each declared tenant's Gitea account, repo, and credentials
   ansible.builtin.include_tasks: onboard_one_tenant.yml

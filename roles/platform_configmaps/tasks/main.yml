@@ -5,12 +5,21 @@
     state: directory
     mode: '0700'
 
+- name: Get Traefik's current LoadBalancer IP
+  ansible.builtin.command: >
+    kubectl get svc traefik -n kube-system
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+  register: traefik_lb_ip_fact
+  changed_when: false
+
 - name: Generate dnsmasq config manifest
   ansible.builtin.template:
     src: dnsmasq-config.yaml.j2
     dest: /tmp/k8s_manifests/dnsmasq-config.yaml
     mode: '0600'
   register: dnsmasq_manifest
+  vars:
+    traefik_lb_ip: "{{ traefik_lb_ip_fact.stdout }}"
 
 - name: Apply dnsmasq config ConfigMap
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-config.yaml

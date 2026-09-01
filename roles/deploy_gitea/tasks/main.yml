@@ -63,6 +63,7 @@
     --namespace gitea
     -f /home/{{ ansible_user }}/gitea-values.yaml
     --set image.tag={{ gitea_version }}
+    --set route.enabled=false
   become: true
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml

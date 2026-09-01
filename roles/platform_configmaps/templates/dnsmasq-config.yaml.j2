@@ -5,7 +5,6 @@ metadata:
   namespace: kube-system
 data:
   dnsmasq.conf: |
-    port=0
     interface=eth0
     bind-interfaces
     dhcp-range={{ cluster_dhcp_range_start }},{{ cluster_dhcp_range_end }},{{ cluster_dhcp_lease_time | default('infinite') }}
@@ -21,6 +20,10 @@ data:
     # NTP server (option 42). Self-joined agents never run node_prep, so DHCP
     # is the only way they learn about a time source.
     dhcp-option=42,{{ cluster_ntp_server | default(gateway_ip) }}
+    dhcp-option=6,{{ cluster_dns_server | default(hostvars[groups['server'][0]]['lan_ip']) }}
+    address=/gitea.cluster.local/{{ traefik_lb_ip }}
+    address=/argocd.cluster.local/{{ traefik_lb_ip }}
+    address=/apps.cluster.local/{{ traefik_lb_ip }}
 {% for host in groups['server'] %}
-    dhcp-host={{ hostvars[host]['mac_address'] }},{{ hostvars[host]['ansible_host'] }},infinite
+    dhcp-host={{ hostvars[host]['mac_address'] }},{{ hostvars[host]['lan_ip'] }},infinite
 {% endfor %}
