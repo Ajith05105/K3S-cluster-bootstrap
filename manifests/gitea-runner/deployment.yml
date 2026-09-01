@@ -1,0 +1,127 @@
+# Managed by ArgoCD (platform-gitea-runner), NOT by Ansible — same pattern
+# and same reasoning as manifests/ansible-runner/deployment.yml: this path is
+# synced into cluster-config and reconciled with prune+selfHeal, so it has to
+# be plain YAML, and applying it from Ansible too would just mean two
+# controllers fighting over one object. roles/deploy_gitea_runner only
+# provisions the one thing ArgoCD structurally cannot: the registration-token
+# Secret, which must never be committed to Git.
+#
+# THREAT MODEL NOTE (worth a line in the workstream 3 writeup): this pod
+# builds whatever Dockerfile a tenant pushes. That's tenant-controlled code
+# execution inside the platform's own trust zone (kube-system), not inside a
+# tenant's own sandboxed namespace — a real, deliberate widening of the
+# attack surface described in the Multi-Tenant Security Model section of the
+# README, not something those four controls (PodSecurity/Quota/NetworkPolicy/
+# AppProject) reach. What actually bounds it: no ServiceAccount token
+# (automountServiceAccountToken: false, so a malicious build has no
+# Kubernetes API to reach for even if it escaped the pod), only SETUID/SETGID
+# added rather than genuine privilege (see securityContext — this is
+# necessarily NOT the same "restricted" bar tenant namespaces hold, because
+# rootless Buildah cannot create its user-namespace mappings without them),
+# pinned CPU/memory so a runaway build can't starve the control plane
+# sharing this node, and pinned to control-plane only because that's where
+# this image gets locally imported today (see custom_images/gitea-runner) —
+# not a statement that it's the ideal place long-term.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-runner
+  namespace: kube-system
+spec:
+  replicas: 1
+  strategy:
+    # Not the default RollingUpdate. v3's runner refuses to share a
+    # registration file between two live processes (see
+    # https://gitea.com/gitea/runner/pulls/1099) — a rolling update briefly
+    # runs old+new pod together, which is exactly two processes racing the
+    # same /data/.runner. Recreate guarantees the old one is fully gone
+    # first.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gitea-runner
+  template:
+    metadata:
+      labels:
+        app: gitea-runner
+    spec:
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      serviceAccountName: gitea-runner
+      automountServiceAccountToken: false
+      containers:
+        - name: gitea-runner
+          image: localhost/gitea-runner:latest
+          imagePullPolicy: Never
+          env:
+            # In-cluster Service DNS, not the gitea.cluster.local LAN
+            # hostname — deliberately sidesteps the whole class of drift bug
+            # documented under Known Limitations (registries.yaml baking in
+            # a ClusterIP that goes stale if the Service is ever recreated).
+            # This talks to Gitea over the cluster network directly instead.
+            - name: GITEA_INSTANCE_URL
+              value: "http://gitea-http.gitea.svc.cluster.local:3000"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # Generous relative to every other platform pod here on
+              # purpose — an image build is a genuine CPU/RAM spike, not a
+              # steady-state workload, and a limit too close to the request
+              # just means every build gets OOMKilled instead of finishing
+              # slowly. Tune against what a Pi 5 can actually spare once
+              # you've watched one real build.
+              cpu: "1500m"
+              memory: 1536Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            # Required, not a mistake: rootless Buildah's newuidmap/newgidmap
+            # step needs this even for a non-root user — confirmed against
+            # containers/buildah#4049. This is *why* this pod cannot live
+            # under the same `restricted` PodSecurity bar as a tenant
+            # namespace; see the threat-model note above.
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SETUID", "SETGID"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: runner-data
+              mountPath: /data
+            - name: build-storage
+              mountPath: /home/build/.local/share/containers
+            - name: runner-token
+              mountPath: /run/secrets/gitea-runner-token
+              readOnly: true
+      volumes:
+        - name: runner-data
+          persistentVolumeClaim:
+            claimName: gitea-runner-data
+        - name: build-storage
+          # Layer cache only, safe to lose on restart — giving it a PVC would
+          # just mean a PVC that grows without bound as image layers
+          # accumulate.
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: runner-token
+          secret:
+            secretName: gitea-runner-token
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-runner-data
+  namespace: kube-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

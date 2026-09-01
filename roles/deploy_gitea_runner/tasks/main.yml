@@ -1,0 +1,50 @@
+---
+- name: Check if gitea-runner-token secret exists
+  ansible.builtin.command: >
+    kubectl get secret gitea-runner-token
+    -n kube-system
+    --ignore-not-found
+  register: secret_check
+  changed_when: false
+  failed_when: false
+
+# no_log is mandatory here for the same reason as ansible-runner-key: without
+# it, `ansible-playbook --diff` prints the token to the terminal.
+#
+# Where gitea_runner_registration_token comes from: a one-time manual step,
+# same category as generating ansible_runner_key with ssh-keygen — NOT a
+# recurring manual step, and not SSH. Visit
+# http://gitea.cluster.local:3000/-/admin/actions/runners once, click
+# "Create new Runner", copy the token it shows you into all.yml. See
+# APPLY_NOTES.md for exactly why this is a one-time UI click rather than
+# something Ansible generates for you: the CLI equivalent
+# (`gitea actions generate-runner-token`) has an open, confirmed upstream bug
+# on some versions where the runner rejects a CLI-generated token
+# (go-gitea/gitea#34664) — worth trying first since it may well be fixed on
+# 1.26.4, but don't build a debugging session around an assumption either
+# way tonight.
+- name: Create gitea-runner-token secret
+  ansible.builtin.command: >
+    kubectl create secret generic gitea-runner-token
+    --namespace kube-system
+    --from-literal=token={{ gitea_runner_registration_token }}
+  when: secret_check.stdout == ""
+  no_log: true
+
+# The Deployment/ServiceAccount/PVC themselves are deliberately NOT applied
+# here — same reasoning as deploy_ansible_runner. They live in
+# manifests/gitea-runner/, get synced into cluster-config by bootstrap_gitops,
+# and are reconciled by ArgoCD (platform-gitea-runner) with prune+selfHeal.
+# This role only provisions what ArgoCD structurally cannot: a Secret that
+# must never be committed to Git.
+#
+# Bootstrap ordering note, same as deploy_ansible_runner: on a first run the
+# Deployment appears only once ArgoCD has synced cluster-config, so don't
+# expect this to be ready before that has happened.
+- name: Wait for gitea-runner pod to be ready (once ArgoCD has created it)
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available
+    deployment/gitea-runner -n kube-system
+    --timeout=180s
+  changed_when: false
+  failed_when: false

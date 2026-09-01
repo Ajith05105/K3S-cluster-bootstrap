@@ -1,0 +1,49 @@
+# Builds and deploys this app automatically. You should not normally need to
+# edit this file.
+#
+# To ship a new version:
+#   - git push, OR
+#   - use Gitea's own "Upload files" / pencil-edit button on this repo in
+#     the browser — no git CLI, no Docker, no kubectl on your own machine at
+#     all.
+#
+# What happens after that: this builds your Dockerfile on the cluster's own
+# arm64 hardware (not your laptop, so there's no cross-arch image-mismatch
+# footgun), pushes the result into your own registry namespace, points
+# values.yaml at the new image, and ArgoCD takes it from there. Usually live
+# within a few seconds of the push.
+name: build-and-deploy
+on:
+  push:
+    branches: [main]
+    # Without this, the tag-bump commit this workflow makes at the bottom
+    # would trigger itself, forever.
+    paths-ignore: ["values.yaml"]
+
+jobs:
+  build:
+    runs-on: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build your image
+        run: |
+          buildah bud --storage-driver=vfs \
+            -t "gitea.cluster.local:3000/${{ gitea.repository_owner }}/app:${{ gitea.sha }}" .
+
+      - name: Push it to your own registry namespace
+        run: |
+          buildah login \
+            -u "${{ gitea.repository_owner }}" -p "${{ secrets.REGISTRY_PASSWORD }}" \
+            gitea.cluster.local:3000
+          buildah push --storage-driver=vfs \
+            "gitea.cluster.local:3000/${{ gitea.repository_owner }}/app:${{ gitea.sha }}"
+
+      - name: Point values.yaml at the new image and let ArgoCD take it from here
+        run: |
+          sed -i "s/tag: .*/tag: \"${{ gitea.sha }}\"/" values.yaml
+          git config user.email "ci@cluster.local"
+          git config user.name "cluster-ci"
+          git add values.yaml
+          git commit -m "ci: deploy ${{ gitea.sha }}"
+          git push "http://${{ gitea.repository_owner }}:${{ secrets.REGISTRY_PASSWORD }}@gitea.cluster.local:3000/${{ gitea.repository_owner }}/app.git" HEAD:main
