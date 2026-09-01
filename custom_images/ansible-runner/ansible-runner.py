@@ -205,56 +205,12 @@ def warn_if_stale_node_record(api, ssh, hostname):
     )
 
 
-def configure_registry_trust(api, ssh, hostname):
-    """Give a self-joined node the same Gitea registry trust that node_prep's
-    configure_registry role gives an ansible-provisioned one.
-
-    Self-joined nodes never run that role, so without this a node reaches
-    Ready and every tenant image pull still fails: nothing resolves
-    gitea.cluster.local, and containerd has no mirror config for it either.
-    Fetched from the API rather than shelled out to kubectl, since this pod
-    already holds a live client -- one less thing that needs kubectl present
-    on the control-plane node this pod happens to be scheduled on.
-    """
-    try:
-        gitea_ip = api.read_namespaced_service(
-            name="gitea-http", namespace="gitea"
-        ).spec.cluster_ip
-    except Exception as e:
-        print(f"Registry trust skipped for {hostname}: could not read "
-              f"gitea-http service: {e}")
-        return
-
-    registries_yaml = (
-        "mirrors:\n"
-        '  "gitea.cluster.local:3000":\n'
-        "    endpoint:\n"
-        f'      - "http://{gitea_ip}:3000"\n'
-        "configs:\n"
-        '  "gitea.cluster.local:3000":\n'
-        "    tls:\n"
-        "      insecure_skip_verify: true\n"
-        # No auth block here on purpose -- containerd does not reliably apply
-        # configs.*.auth to mirror-endpoint requests on this k3s version
-        # (same reason node_prep's configure_registry role omits it).
-    )
-    cmd = (
-        f"grep -q gitea.cluster.local /etc/hosts || "
-        f"echo '{gitea_ip} gitea.cluster.local' | sudo tee -a /etc/hosts >/dev/null && "
-        f"sudo mkdir -p /etc/rancher/k3s && "
-        f"sudo tee /etc/rancher/k3s/registries.yaml >/dev/null << 'EOF'\n"
-        f"{registries_yaml}EOF"
-    )
-    _, stdout, stderr = ssh.exec_command(cmd)
-    _ = stdout.read()
-    err = stderr.read().decode().strip()
-    if stdout.channel.recv_exit_status() == 0:
-        print(f"Registry trust configured on {hostname}")
-    else:
-        print(f"Registry trust setup failed for {hostname}: {err}")
-
-
 def provision(api, worker, server_url, token, role):
+    """Provision one node. Returns True only if k3s installed successfully.
+
+    The caller relies on this: a failed server join must not be mistaken for a
+    successful one, or an unreachable host consumes the one-join-per-cycle slot.
+    """
     ip = worker["ip"]
     hostname = worker["hostname"]
     print(f"Provisioning {hostname} ({ip}) as {role}...")
@@ -338,29 +294,6 @@ def provision(api, worker, server_url, token, role):
         if setup_code != 0:
             raise Exception(f"System preparation failed with exit code {setup_code}: {setup_err}")
 
-        # 2b. Fix SELinux labels if this node enforces them. mv preserves the
-        #     source's label (user_tmp_t, from /tmp) instead of picking up the
-        #     right one for the new location -- harmless on Ubuntu (no
-        #     SELinux), but on any enforcing distro (Fedora/RHEL family --
-        #     e.g. Asahi) the binary silently fails to execute with a plain
-        #     "Permission denied" despite completely correct ownership and
-        #     +x. Cost a long stretch tonight before the label, not the file
-        #     itself, turned out to be the actual problem.
-        ssh.exec_command(
-            f"command -v restorecon >/dev/null 2>&1 && "
-            f"sudo restorecon -R {K3S_BINARY_FINAL} {K3S_IMAGES_DIR} "
-            f"/etc/rancher 2>/dev/null; true"
-        )[1].channel.recv_exit_status()
-
-        # 2c. Registry trust -- the other thing node_prep's configure_registry
-        #     role does for ansible-provisioned nodes that self-joined nodes
-        #     never get, since they never run that role at all. Without this,
-        #     k3s starts fine and the node goes Ready, then every tenant image
-        #     pull fails: no /etc/hosts entry for gitea.cluster.local, and no
-        #     containerd mirror config either. Written before the install
-        #     below so a self-joining node's first start already has it.
-        configure_registry_trust(api, ssh, hostname)
-
         # 3. Run install script — role decides whether this joins as a
         #    control-plane member or a worker. The server form mirrors
         #    roles/k3s_server (server + --tls-san + --node-ip).
@@ -392,19 +325,30 @@ def provision(api, worker, server_url, token, role):
             # The k3s binary was already moved into place by step 2, so only
             # the install-script wrapper needs cleaning up.
             ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
-        else:
-            print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
+            ssh.close()
+            return True
 
+        print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
         ssh.close()
+        return False
 
     except Exception as e:
         # Deliberately references no locals from the try block — a failure
         # during connect/SFTP happens before install_err/setup_err exist, and
         # touching them here would raise NameError and mask the real error.
         print(f"Provisioning failed for {hostname}: {type(e).__name__}: {e}")
+        return False
 
 
 def process_workers(api, cm, server_url, token):
+    # At most one control-plane join per cycle — but a FAILED attempt must not
+    # consume that slot, and must not stop agents being processed. This used to
+    # `return` unconditionally after any server attempt, so a single
+    # unreachable host with a server-shaped name (a Mac Mini called
+    # "mac-mini-server") abandoned the whole registry on every cycle and no
+    # agent was ever provisioned again.
+    server_joined = False
+
     for worker in parse_workers(cm):
         hostname = worker["hostname"]
 
@@ -423,18 +367,22 @@ def process_workers(api, cm, server_url, token):
             continue
 
         if role == "server":
+            if server_joined:
+                continue
             if not KUBE_VIP_VIP:
                 print(f"Skipping server join for {hostname}: KUBE_VIP_VIP is "
                       "unset, so --tls-san would be missing.")
                 continue
             if not control_plane_is_healthy(api):
                 continue
-            provision(api, worker, server_url, token, role)
-            # One control-plane join per cycle. The new member has to register
-            # and go Ready before control_plane_is_healthy() can give a
-            # meaningful answer about whether it's safe to add another.
-            print("Server join attempted — pausing this cycle so etcd settles.")
-            return
+            if provision(api, worker, server_url, token, role):
+                # A real member joined. It has to register and go Ready before
+                # control_plane_is_healthy() can answer meaningfully about
+                # adding another, so no further server joins this cycle.
+                server_joined = True
+                print("Server joined — deferring further server joins "
+                      "so etcd settles.")
+            continue
 
         provision(api, worker, server_url, token, role)
 
