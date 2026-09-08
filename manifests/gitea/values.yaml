@@ -3,6 +3,20 @@ image:
   repository: gitea
   rootless: true
 
+
+strategy:
+  type: Recreate
+
+
+postgresql:
+  enabled: false
+postgresql-ha:
+  enabled: false
+valkey:
+  enabled: false
+valkey-cluster:
+  enabled: false
+
 ingress:
   enabled: true
   className: traefik
