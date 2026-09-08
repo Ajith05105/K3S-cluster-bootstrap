@@ -9,9 +9,11 @@
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-serviceaccount.yml
   when: sa_manifest.changed
 
-- name: Copy dnsmasq deployment manifest
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../../manifests/dnsmasq/deployment.yml"
+# template, not copy — this file has {{ dnsmasq_version }} in it, and copy
+# moves bytes verbatim without rendering Jinja at all.
+- name: Render dnsmasq deployment manifest
+  ansible.builtin.template:
+    src: deployment.yml.j2
     dest: /tmp/k8s_manifests/dnsmasq-deployment.yml
   register: deploy_manifest
 

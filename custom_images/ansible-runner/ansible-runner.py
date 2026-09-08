@@ -13,6 +13,11 @@ NAMESPACE = "kube-system"
 SSH_USER = "pi"
 SSH_KEY_PATH = "/root/.ssh/ansible_runner_key"
 
+GITEA_NAMESPACE = "gitea" # namespace where gitea pod is hosted
+GITEA_SERVICE = "gitea-http" 
+REGISTRY_HOST = "gitea.cluster.local:3000" # string used to redirect to local registry
+REGISTRIES_YAML_PATH = "/etc/rancher/k3s/registries.yaml"
+
 # kube-vip's control-plane VIP, injected by roles/deploy_ansible_runner.
 # A self-joined server needs this in its serving cert SANs (same as
 # roles/k3s_server does), otherwise kube-vip failing the VIP over to that
@@ -152,6 +157,76 @@ def node_is_ready(api, hostname):
     return False
 
 
+def get_gitea_clusterip(api):
+    """Gitea's current ClusterIP, or None if the Service doesn't exist yet.
+
+    None (not an exception) is deliberate: at cluster-bootstrap time this pod
+    can start before deploy_gitea has run, in the same play. That's not an
+    error to surface loudly — it just means there's nothing to sync yet, same
+    as an empty worker-registry isn't an error.
+    """
+    try:
+        svc = api.read_namespaced_service(name=GITEA_SERVICE, namespace=GITEA_NAMESPACE)
+        return svc.spec.cluster_ip
+    except Exception:
+        return None
+
+
+def registries_yaml_content(cluster_ip):
+    return (
+        "mirrors:\n"
+        f'  "{REGISTRY_HOST}":\n'
+        "    endpoint:\n"
+        f'      - "http://{cluster_ip}:3000"\n'
+        "configs:\n"
+        f'  "{REGISTRY_HOST}":\n'
+        "    tls:\n"
+        "      insecure_skip_verify: true\n"
+    )
+
+
+def sync_registry_mirror(ip, hostname, cluster_ip):
+    """Keep an already-Ready agent's registries.yaml pointed at Gitea's
+    current ClusterIP, restarting k3s-agent only if it actually changed.
+
+    """
+    desired = registries_yaml_content(cluster_ip)
+    try:
+        key = paramiko.Ed25519Key.from_private_key_file(SSH_KEY_PATH)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=SSH_USER, pkey=key, timeout=10)
+
+        _, stdout, _ = ssh.exec_command(f"sudo cat {REGISTRIES_YAML_PATH} 2>/dev/null || true")
+        current = stdout.read().decode()
+
+        if current == desired:
+            ssh.close()
+            return
+
+        write_cmd = (
+            f"sudo mkdir -p $(dirname {REGISTRIES_YAML_PATH}) && "
+            f"cat <<'REGISTRIES_EOF' | sudo tee {REGISTRIES_YAML_PATH} > /dev/null\n"
+            f"{desired}"
+            "REGISTRIES_EOF"
+        )
+        _, stdout, stderr = ssh.exec_command(write_cmd)
+        write_err = stderr.read().decode().strip()
+        write_code = stdout.channel.recv_exit_status()
+        if write_code != 0:
+            print(f"Failed to update registries.yaml on {hostname}: {write_err}")
+            ssh.close()
+            return
+
+        print(f"registries.yaml updated on {hostname} (Gitea -> {cluster_ip}), "
+              "restarting k3s-agent...")
+        ssh.exec_command("sudo systemctl restart k3s-agent")
+        ssh.close()
+
+    except Exception as e:
+        print(f"Registry sync failed for {hostname} ({ip}): {type(e).__name__}: {e}")
+
+
 def is_provisioned(ip, role):
     unit = "k3s" if role == "server" else "k3s-agent"
     try:
@@ -206,6 +281,11 @@ def warn_if_stale_node_record(api, ssh, hostname):
 
 
 def provision(api, worker, server_url, token, role):
+    """Provision one node. Returns True only if k3s installed successfully.
+
+    The caller relies on this: a failed server join must not be mistaken for a
+    successful one, or an unreachable host consumes the one-join-per-cycle slot.
+    """
     ip = worker["ip"]
     hostname = worker["hostname"]
     print(f"Provisioning {hostname} ({ip}) as {role}...")
@@ -320,19 +400,30 @@ def provision(api, worker, server_url, token, role):
             # The k3s binary was already moved into place by step 2, so only
             # the install-script wrapper needs cleaning up.
             ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
-        else:
-            print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
+            ssh.close()
+            return True
 
+        print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
         ssh.close()
+        return False
 
     except Exception as e:
         # Deliberately references no locals from the try block — a failure
         # during connect/SFTP happens before install_err/setup_err exist, and
         # touching them here would raise NameError and mask the real error.
         print(f"Provisioning failed for {hostname}: {type(e).__name__}: {e}")
+        return False
 
 
-def process_workers(api, cm, server_url, token):
+def process_workers(api, cm, server_url, token, gitea_cluster_ip):
+    # At most one control-plane join per cycle — but a FAILED attempt must not
+    # consume that slot, and must not stop agents being processed. This used to
+    # `return` unconditionally after any server attempt, so a single
+    # unreachable host with a server-shaped name (a Mac Mini called
+    # "mac-mini-server") abandoned the whole registry on every cycle and no
+    # agent was ever provisioned again.
+    server_joined = False
+
     for worker in parse_workers(cm):
         hostname = worker["hostname"]
 
@@ -346,23 +437,34 @@ def process_workers(api, cm, server_url, token):
         # for "is there even k3s on this box" — e.g. a re-flashed board, which
         # keeps its MAC so it never looks new to lease-watcher.
         if node_is_ready(api, hostname):
+            # Already joined — the one thing still worth checking on every
+            # cycle is whether its container registry mirror has drifted. Servers get
+            # this from their own local systemd timer; agents have no
+            # kubeconfig of their own, so this pod is the only thing that can
+            # reach them.
+            if role == "agent" and gitea_cluster_ip:
+                sync_registry_mirror(worker["ip"], hostname, gitea_cluster_ip)
             continue
         if is_provisioned(worker["ip"], role):
             continue
 
         if role == "server":
+            if server_joined:
+                continue
             if not KUBE_VIP_VIP:
                 print(f"Skipping server join for {hostname}: KUBE_VIP_VIP is "
                       "unset, so --tls-san would be missing.")
                 continue
             if not control_plane_is_healthy(api):
                 continue
-            provision(api, worker, server_url, token, role)
-            # One control-plane join per cycle. The new member has to register
-            # and go Ready before control_plane_is_healthy() can give a
-            # meaningful answer about whether it's safe to add another.
-            print("Server join attempted — pausing this cycle so etcd settles.")
-            return
+            if provision(api, worker, server_url, token, role):
+                # A real member joined. It has to register and go Ready before
+                # control_plane_is_healthy() can answer meaningfully about
+                # adding another, so no further server joins this cycle.
+                server_joined = True
+                print("Server joined — deferring further server joins "
+                      "so etcd settles.")
+            continue
 
         provision(api, worker, server_url, token, role)
 
@@ -382,7 +484,8 @@ def reconcile(api, server_url, token):
             name=WORKER_CONFIGMAP,
             namespace=NAMESPACE
         )
-        process_workers(api, cm, server_url, token)
+        gitea_cluster_ip = get_gitea_clusterip(api)
+        process_workers(api, cm, server_url, token, gitea_cluster_ip)
     except Exception as e:
         print(f"Reconciliation error: {e}")
     print("Reconciliation complete.")
@@ -413,7 +516,8 @@ def main():
                 timeout_seconds=RESYNC_INTERVAL,
             ):
                 if event["type"] in ["ADDED", "MODIFIED"]:
-                    process_workers(api, event["object"], server_url, token)
+                    gitea_cluster_ip = get_gitea_clusterip(api)
+                    process_workers(api, event["object"], server_url, token, gitea_cluster_ip)
         except Exception as e:
             # A 401 here means the projected ServiceAccount token rotated and
             # the cached credential went stale. Rebuild the client instead of

@@ -60,9 +60,10 @@
         path: "/tmp/k3s-images/kube-vip-cloud-provider.tar"
       register: cloud_provider_tar
 
-    - name: Check if kube-vip DaemonSet manifest is already vendored
+    
+    - name: Check if kube-vip DaemonSet manifest is already generated
       ansible.builtin.stat:
-        path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
       register: vendored_daemonset
 
     - name: Check if kube-vip RBAC manifest is already vendored
@@ -75,6 +76,110 @@
       ansible.builtin.stat:
         path: "/tmp/k3s-images/gitea.tar"
       register: gitea_tar
+
+    - name: Check if argocd image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/argocd.tar"
+      register: argocd_tar
+
+    - name: Check if redis image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/redis.tar"
+      register: redis_tar
+
+    - name: Check if dex image tar exists
+      ansible.builtin.stat:
+        path: "/tmp/k3s-images/dex.tar"
+      register: dex_tar
+
+    # === skopeo: pulls a remote image straight to a tar, no daemon/VM needed ===
+    # Everything that is only PULLED (never built) goes through skopeo instead
+    # of podman. It just copies bytes over the network.
+    
+    - name: Check if skopeo is already installed
+      ansible.builtin.command: which skopeo
+      register: skopeo_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install skopeo (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: skopeo
+        state: present
+        update_cache: true
+      become: true
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - skopeo_check.rc != 0
+
+    - name: Install skopeo (Darwin)
+      ansible.builtin.command: brew install skopeo
+      become: false
+      when:
+        - ansible_facts['os_family'] == 'Darwin'
+        - skopeo_check.rc != 0
+
+    - name: Fail with install instructions if skopeo is missing on an unsupported OS
+      ansible.builtin.fail:
+        msg: >-
+          skopeo is required and this playbook only knows how to auto-install
+          it on Debian/Ubuntu (apt) and macOS (brew). Install it manually for
+          {{ ansible_facts['os_family'] }}:
+          https://github.com/containers/skopeo/blob/main/install.md
+      when:
+        - skopeo_check.rc != 0
+        - ansible_facts['os_family'] not in ['Debian', 'Darwin']
+
+    - name: Pull dnsmasq image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://docker.io/dockurr/dnsmasq:{{ dnsmasq_version }}
+        docker-archive:/tmp/k3s-images/dnsmasq.tar:docker.io/dockurr/dnsmasq:{{ dnsmasq_version }}
+      when: not dnsmasq_tar.stat.exists
+
+    - name: Pull kube-vip image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+        docker-archive:/tmp/k3s-images/kube-vip.tar:ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
+      when: not kubevip_tar.stat.exists
+
+    - name: Pull kube-vip-cloud-provider image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
+        docker-archive:/tmp/k3s-images/kube-vip-cloud-provider.tar:ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
+      when: not cloud_provider_tar.stat.exists
+
+    - name: Pull gitea image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://docker.gitea.com/gitea:{{ gitea_version }}-rootless
+        docker-archive:/tmp/k3s-images/gitea.tar:docker.gitea.com/gitea:{{ gitea_version }}-rootless
+      when: not gitea_tar.stat.exists
+
+    - name: Pull argocd image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://quay.io/argoproj/argocd:{{ argocd_version }}
+        docker-archive:/tmp/k3s-images/argocd.tar:quay.io/argoproj/argocd:{{ argocd_version }}
+      when: not argocd_tar.stat.exists
+
+    - name: Pull redis image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://public.ecr.aws/docker/library/redis:{{ redis_version }}
+        docker-archive:/tmp/k3s-images/redis.tar:public.ecr.aws/docker/library/redis:{{ redis_version }}
+      when: not redis_tar.stat.exists
+
+    - name: Pull dex image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://ghcr.io/dexidp/dex:{{ dex_version }}
+        docker-archive:/tmp/k3s-images/dex.tar:ghcr.io/dexidp/dex:{{ dex_version }}
+      when: not dex_tar.stat.exists
+
+    # === podman: scoped to exactly two builds + one run (manifest generation) ===
 
     - name: Install QEMU for cross-platform builds (Linux only)
       ansible.builtin.apt:
@@ -97,20 +202,7 @@
       changed_when: false
       when:
         - ansible_facts['os_family'] == 'Darwin'
-        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
-          or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
-          or not gitea_tar.stat.exists
-
-    - name: Pull dnsmasq image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64 docker.io/dockurr/dnsmasq:latest
-      when: not dnsmasq_tar.stat.exists
-
-    - name: Save dnsmasq image
-      ansible.builtin.command: >
-        podman save dockurr/dnsmasq:latest
-        -o /tmp/k3s-images/dnsmasq.tar
-      when: not dnsmasq_tar.stat.exists
+        - not watcher_tar.stat.exists or not runner_tar.stat.exists or not vendored_daemonset.stat.exists
 
     - name: Build lease-watcher image for arm64
       ansible.builtin.command: >
@@ -140,30 +232,6 @@
         -o /tmp/k3s-images/ansible-runner.tar
       when: not runner_tar.stat.exists
 
-    - name: Pull kube-vip image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
-      when: not kubevip_tar.stat.exists
-
-    - name: Save kube-vip image
-      ansible.builtin.command: >
-        podman save ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}
-        -o /tmp/k3s-images/kube-vip.tar
-      when: not kubevip_tar.stat.exists
-
-    - name: Pull kube-vip-cloud-provider image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
-      when: not cloud_provider_tar.stat.exists
-
-    - name: Save kube-vip-cloud-provider image
-      ansible.builtin.command: >
-        podman save ghcr.io/kube-vip/kube-vip-cloud-provider:{{ kube_vip_cloud_provider_version }}
-        -o /tmp/k3s-images/kube-vip-cloud-provider.tar
-      when: not cloud_provider_tar.stat.exists
-
     - name: Ensure manifest files directory exists
       ansible.builtin.file:
         path: "{{ playbook_dir }}/../manifests/kube-vip/"
@@ -171,6 +239,9 @@
         mode: '0755'
       when: not vendored_daemonset.stat.exists or not vendored_rbac.stat.exists
 
+    # skopeo only copies bytes — generating the manifest means actually
+    # executing the kube-vip binary's own `manifest daemonset` subcommand, so
+    # this one step needs a real container runtime and stays on podman.
     - name: Load kube-vip image from tar (for manifest generation)
       ansible.builtin.command: >
         podman load -i /tmp/k3s-images/kube-vip.tar
@@ -192,10 +263,17 @@
       register: generated_daemonset
       when: not vendored_daemonset.stat.exists
 
-    - name: Save generated DaemonSet manifest into the repo
+    - name: Ensure the deploy_kube_vip files directory exists
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../roles/deploy_kube_vip/files"
+        state: directory
+        mode: '0755'
+      when: not vendored_daemonset.stat.exists
+
+    - name: Save generated DaemonSet manifest into the role
       ansible.builtin.copy:
         content: "{{ generated_daemonset.stdout }}"
-        dest: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-daemonset.yaml"
+        dest: "{{ playbook_dir }}/../roles/deploy_kube_vip/files/kube-vip-daemonset.yaml"
         mode: '0644'
       when: not vendored_daemonset.stat.exists
 
@@ -223,18 +301,6 @@
         path: "{{ playbook_dir }}/../manifests/kube-vip/kube-vip-cloud-controller.yaml"
         regexp: 'imagePullPolicy: Always'
         replace: 'imagePullPolicy: IfNotPresent'
-
-    - name: Pull gitea image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        docker.gitea.com/gitea:{{ gitea_version }}-rootless
-      when: not gitea_tar.stat.exists
-
-    - name: Save gitea image
-      ansible.builtin.command: >
-        podman save docker.gitea.com/gitea:{{ gitea_version }}-rootless
-        -o /tmp/k3s-images/gitea.tar
-      when: not gitea_tar.stat.exists
 
     # Helm chart is vendored into the role so cluster bootstrap works offline, without a Helm repo add
     - name: Check if gitea chart is already vendored
@@ -264,21 +330,9 @@
         --untardir {{ playbook_dir }}/../manifests/argocd
       when: not vendored_argocd_chart.stat.exists
 
-    - name: Check if argocd image tar exists
-      ansible.builtin.stat:
-        path: "/tmp/k3s-images/argocd.tar"
-      register: argocd_tar
-
-    - name: Check if redis image tar exists
-      ansible.builtin.stat:
-        path: "/tmp/k3s-images/redis.tar"
-      register: redis_tar
-
-    - name: Check if dex image tar exists
-      ansible.builtin.stat:
-        path: "/tmp/k3s-images/dex.tar"
-      register: dex_tar
-
+    # crane is unrelated to this pull/build split — it PUSHES local tars into
+    # Gitea's registry (see push_argocd_images_to_gitea), it never pulls from
+    # upstream, so it stays exactly as it was.
     - name: Check if crane binary is already staged
       ansible.builtin.stat:
         path: "/tmp/k3s-images/crane"
@@ -313,48 +367,10 @@
         remote_src: true
       when: not crane_binary_staged.stat.exists
 
-    - name: Pull argocd image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        quay.io/argoproj/argocd:{{ argocd_version }}
-      when: not argocd_tar.stat.exists
-
-    - name: Save argocd image
-      ansible.builtin.command: >
-        podman save quay.io/argoproj/argocd:{{ argocd_version }}
-        -o /tmp/k3s-images/argocd.tar
-      when: not argocd_tar.stat.exists
-
-    - name: Pull redis image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        public.ecr.aws/docker/library/redis:{{ redis_version }}
-      when: not redis_tar.stat.exists
-
-    - name: Save redis image
-      ansible.builtin.command: >
-        podman save public.ecr.aws/docker/library/redis:{{ redis_version }}
-        -o /tmp/k3s-images/redis.tar
-      when: not redis_tar.stat.exists
-
-    - name: Pull dex image for arm64
-      ansible.builtin.command: >
-        podman pull --platform linux/arm64
-        ghcr.io/dexidp/dex:{{ dex_version }}
-      when: not dex_tar.stat.exists
-
-    - name: Save dex image
-      ansible.builtin.command: >
-        podman save ghcr.io/dexidp/dex:{{ dex_version }}
-        -o /tmp/k3s-images/dex.tar
-      when: not dex_tar.stat.exists
-
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop
       changed_when: false
       failed_when: false
       when:
         - ansible_facts['os_family'] == 'Darwin'
-        - not dnsmasq_tar.stat.exists or not watcher_tar.stat.exists or not runner_tar.stat.exists
-          or not kubevip_tar.stat.exists or not cloud_provider_tar.stat.exists or not vendored_daemonset.stat.exists
-          or not gitea_tar.stat.exists
+        - not watcher_tar.stat.exists or not runner_tar.stat.exists or not vendored_daemonset.stat.exists

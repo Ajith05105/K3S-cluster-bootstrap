@@ -1,5 +1,0 @@
-tenantName: ajith
-memRequest: "128Mi"
-memLimit: "200Mi"
-cpuRequest: "100m"
-cpuLimit: "200m"

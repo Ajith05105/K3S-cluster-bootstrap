@@ -51,7 +51,7 @@
 
 - name: Stage kube-vip DaemonSet manifest
   ansible.builtin.copy:
-    src: "{{ role_path }}/../../manifests/kube-vip/kube-vip-daemonset.yaml"
+    src: kube-vip-daemonset.yaml
     dest: /tmp/k8s_manifests/kube-vip-daemonset.yaml
     mode: '0600'
 
