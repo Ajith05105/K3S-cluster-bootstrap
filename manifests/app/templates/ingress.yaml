@@ -1,0 +1,20 @@
+{{- if .Values.ingress.host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.appName }}
+  namespace: {{ .Values.appName }}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.appName }}
+                port:
+                  number: {{ .Values.port }}
+{{- end }}

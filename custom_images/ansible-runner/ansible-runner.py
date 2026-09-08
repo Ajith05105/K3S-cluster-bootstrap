@@ -28,6 +28,12 @@ KUBE_VIP_VIP = os.environ.get("KUBE_VIP_VIP", "").strip()
 # this is the only place they get a persistent time source.
 NTP_SERVER = os.environ.get("NTP_SERVER", "").strip()
 
+# Dedicated, non-admin Gitea account (created by roles/bootstrap_gitops) used
+# only so agent nodes can pull images from the registry
+
+REGISTRY_PULLER_USERNAME = "registry-puller"
+REGISTRY_PULLER_PASSWORD = os.environ.get("REGISTRY_PULLER_PASSWORD", "").strip()
+
 # How often to re-check every registry entry against reality. Lower means
 # drift (re-flashed board, dead node, failed provision) is noticed sooner, at
 # the cost of more SSH probes per node per hour.
@@ -160,15 +166,25 @@ def node_is_ready(api, hostname):
 def get_gitea_clusterip(api):
     """Gitea's current ClusterIP, or None if the Service doesn't exist yet.
 
-    None (not an exception) is deliberate: at cluster-bootstrap time this pod
-    can start before deploy_gitea has run, in the same play. That's not an
-    error to surface loudly — it just means there's nothing to sync yet, same
-    as an empty worker-registry isn't an error.
+    None (not an exception) is deliberate for a genuine 404: at
+    cluster-bootstrap time this pod can start before deploy_gitea has run, in
+    the same play. That's not an error to surface loudly — it just means
+    there's nothing to sync yet, same as an empty worker-registry isn't an
+    error. Anything else (403 in particular — an RBAC gap, not a timing
+    thing) DOES get printed: this exact silence is what let a missing
+    services/gitea-http grant go unnoticed for hours, since a 403 looked
+    identical to "not up yet" with no log line either way.
     """
     try:
         svc = api.read_namespaced_service(name=GITEA_SERVICE, namespace=GITEA_NAMESPACE)
         return svc.spec.cluster_ip
-    except Exception:
+    except client.exceptions.ApiException as e:
+        if e.status != 404:
+            print(f"get_gitea_clusterip failed (not a simple 'not found'): "
+                  f"HTTP {e.status}: {e.reason}")
+        return None
+    except Exception as e:
+        print(f"get_gitea_clusterip failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -182,6 +198,9 @@ def registries_yaml_content(cluster_ip):
         f'  "{REGISTRY_HOST}":\n'
         "    tls:\n"
         "      insecure_skip_verify: true\n"
+        "    auth:\n"
+        f'      username: "{REGISTRY_PULLER_USERNAME}"\n'
+        f'      password: "{REGISTRY_PULLER_PASSWORD}"\n'
     )
 
 
@@ -208,7 +227,8 @@ def sync_registry_mirror(ip, hostname, cluster_ip):
             f"sudo mkdir -p $(dirname {REGISTRIES_YAML_PATH}) && "
             f"cat <<'REGISTRIES_EOF' | sudo tee {REGISTRIES_YAML_PATH} > /dev/null\n"
             f"{desired}"
-            "REGISTRIES_EOF"
+            "REGISTRIES_EOF\n"
+            f"sudo chmod 600 {REGISTRIES_YAML_PATH}"
         )
         _, stdout, stderr = ssh.exec_command(write_cmd)
         write_err = stderr.read().decode().strip()

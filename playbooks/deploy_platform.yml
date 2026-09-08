@@ -8,59 +8,16 @@
     - deploy_ansible_runner
     - deploy_gitea
 
+- name: Push ArgoCD images and deploy ArgoCD
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
+    - push_argocd_images_to_gitea
+    - bootstrap_gitops
+
 - name: Configure container registry mirror on all nodes
   hosts: server
   become: true
   serial: 1
   roles:
     - configure_registry
-
-- name: Push ArgoCD images and deploy ArgoCD
-  hosts: "{{ groups['server'][0] }}"
-  become: true
-  roles:
-    - push_argocd_images_to_gitea
-    - deploy_argocd
-    - bootstrap_gitops
-
-- name: Configure local DNS entries for cluster services
-  hosts: localhost
-  gather_facts: true
-  tasks:
-    - name: Get Traefik's external LoadBalancer IP
-      ansible.builtin.command: >
-        kubectl get svc traefik -n kube-system
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-      delegate_to: "{{ groups['server'][0] }}"
-      become: true
-      register: traefik_lb_ip
-      changed_when: false
-
-    - name: Ensure argocd.cluster.local resolves locally
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        regexp: 'argocd\\.cluster\\.local'
-        line: "{{ traefik_lb_ip.stdout }} argocd.cluster.local"
-        state: present
-      become: true
-      when: ansible_facts['os_family'] in ['Debian', 'RedHat', 'Darwin']
-
-    - name: Ensure gitea.cluster.local resolves locally
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        regexp: 'gitea\\.cluster\\.local'
-        line: "{{ traefik_lb_ip.stdout }} gitea.cluster.local"
-        state: present
-      become: true
-      when: ansible_facts['os_family'] in ['Debian', 'RedHat', 'Darwin']
-
-    - name: Manual step required on Windows
-      ansible.builtin.debug:
-        msg: >
-          Not Linux/macOS — add this line to
-          C:\\Windows\\System32\\drivers\\etc\\hosts (as Administrator):
-          {{ traefik_lb_ip.stdout }} argocd.cluster.local
-          {{ traefik_lb_ip.stdout }} gitea.cluster.local
-          If running Ansible via WSL: editing WSL's own /etc/hosts does NOT
-          affect a Windows-side browser — edit the Windows file directly.
-      when: ansible_facts['os_family'] not in ['Debian', 'RedHat', 'Darwin']

@@ -66,6 +66,16 @@ spec:
             # re-flashed board, a failed provision, or a manual k3s-uninstall.
             - name: RESYNC_INTERVAL
               value: "300"
+
+            # Used to authenticate registries.yaml pulls for self-joined
+            # agents against the registry-puller service account — see
+            # roles/deploy_ansible_runner (creates the Secret) and
+            # roles/bootstrap_gitops (creates the Gitea account).
+            - name: REGISTRY_PULLER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: registry-puller-credentials
+                  key: password
           volumeMounts:
             - name: ssh-key
               mountPath: /root/.ssh/ansible_runner_key

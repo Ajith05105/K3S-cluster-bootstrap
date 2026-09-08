@@ -38,6 +38,61 @@
   when: cluster_config_check.status == 404
   no_log: true
 
+- name: Check if apps org already exists in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/orgs/apps"
+    method: GET
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: apps_org_check
+  no_log: true
+
+- name: Create apps org in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/orgs"
+    method: POST
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      username: apps
+      visibility: private
+    status_code: [201]
+  when: apps_org_check.status == 404
+  no_log: true
+
+# Creates an service account so the nodes can pull images from the registry
+- name: Check if registry-puller service account already exists in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/users/registry-puller"
+    method: GET
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: registry_puller_check
+  no_log: true
+
+- name: Create registry-puller service account in Gitea
+  ansible.builtin.uri:
+    url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/admin/users"
+    method: POST
+    user: "{{ gitea_admin_username }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      username: registry-puller
+      email: registry-puller@cluster.local
+      password: "{{ registry_puller_password }}"
+      must_change_password: false
+    status_code: [201]
+  when: registry_puller_check.status == 404
+  no_log: true
+
 - name: Ensure staging directory ownership matches the ansible user (fixes root-owned leftovers)
   ansible.builtin.file:
     path: "/home/{{ ansible_user }}/cluster-config-push"

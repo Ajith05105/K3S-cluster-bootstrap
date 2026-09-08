@@ -30,6 +30,23 @@
     path: /tmp/ansible_runner_key
     state: absent
 
+- name: Check if registry-puller credentials secret exists
+  ansible.builtin.command: >
+    kubectl get secret registry-puller-credentials
+    -n kube-system
+    --ignore-not-found
+  register: puller_secret_check
+  changed_when: false
+  failed_when: false
+
+- name: Create registry-puller credentials secret
+  ansible.builtin.command: >
+    kubectl create secret generic registry-puller-credentials
+    --namespace kube-system
+    --from-literal=password={{ registry_puller_password }}
+  when: puller_secret_check.stdout == ""
+  no_log: true
+
 - name: Copy ansible-runner serviceaccount manifest
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/ansible-runner/serviceaccount.yml"

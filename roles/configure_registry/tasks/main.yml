@@ -8,43 +8,12 @@
   changed_when: false
 
 
-
-- name: Write k3s registries.yaml to trust the Gitea registry mirror
-  ansible.builtin.copy:
-    dest: /etc/rancher/k3s/registries.yaml
-    mode: '0644'
-    content: |
-      mirrors:
-        "gitea.cluster.local:3000":
-          endpoint:
-            - "http://{{ hostvars[groups['server'][0]]['gitea_cluster_ip']['stdout'] }}:3000"
-      configs:
-        "gitea.cluster.local:3000":
-          tls:
-            insecure_skip_verify: true
-          # NOTE: no auth block here on purpose — containerd does not reliably
-          # apply configs.*.auth to mirror-endpoint requests on this k3s version
-          # (confirmed via multiple open k3s-io/k3s issues). Credentials for
-          # scheduled pods are handled by the imagePullSecret in deploy_argocd
-          # instead; this section only needs the TLS/insecure bit.
-  register: registries_config
-  no_log: true
-
-- name: Restart k3s to pick up registry config
-  ansible.builtin.systemd:
-    name: k3s
-    state: restarted
-  when: registries_config.changed
-
-
-# This is a systemd cron job that ensures that they always point to the right cluster
-# ip of gitea.
-
 - name: Copy registry reconciliation script
   ansible.builtin.template:
     src: sync-registry-mirror.sh.j2
     dest: /usr/local/bin/sync-registry-mirror.sh
-    mode: '0755'
+    mode: '0700'
+  no_log: true
 
 - name: Install registry reconciliation systemd service
   ansible.builtin.template:
@@ -70,3 +39,28 @@
     name: k3s-registry-reconcile.timer
     enabled: true
     state: started
+
+- name: Write k3s registries.yaml to trust the Gitea registry mirror
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: '0600'
+    content: |
+      mirrors:
+        "gitea.cluster.local:3000":
+          endpoint:
+            - "http://{{ hostvars[groups['server'][0]]['gitea_cluster_ip']['stdout'] }}:3000"
+      configs:
+        "gitea.cluster.local:3000":
+          tls:
+            insecure_skip_verify: true
+          auth:
+            username: registry-puller
+            password: "{{ registry_puller_password }}"
+  register: registries_config
+  no_log: true
+
+- name: Restart k3s to pick up registry config
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  when: registries_config.changed
