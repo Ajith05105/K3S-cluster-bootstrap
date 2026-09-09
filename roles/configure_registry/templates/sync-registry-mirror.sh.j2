@@ -21,6 +21,7 @@ if [ -z "${CURRENT_IP}" ]; then
   exit 0
 fi
 
+
 DESIRED=$(cat <<EOF
 mirrors:
   "${REGISTRY_HOST}":
@@ -30,9 +31,6 @@ configs:
   "${REGISTRY_HOST}":
     tls:
       insecure_skip_verify: true
-    auth:
-      username: "registry-puller"
-      password: "{{ registry_puller_password }}"
 EOF
 )
 

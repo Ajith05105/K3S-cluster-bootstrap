@@ -12,8 +12,7 @@
   ansible.builtin.template:
     src: sync-registry-mirror.sh.j2
     dest: /usr/local/bin/sync-registry-mirror.sh
-    mode: '0700'
-  no_log: true
+    mode: '0755'
 
 - name: Install registry reconciliation systemd service
   ansible.builtin.template:
@@ -43,7 +42,7 @@
 - name: Write k3s registries.yaml to trust the Gitea registry mirror
   ansible.builtin.copy:
     dest: /etc/rancher/k3s/registries.yaml
-    mode: '0600'
+    mode: '0644'
     content: |
       mirrors:
         "gitea.cluster.local:3000":
@@ -53,9 +52,6 @@
         "gitea.cluster.local:3000":
           tls:
             insecure_skip_verify: true
-          auth:
-            username: registry-puller
-            password: "{{ registry_puller_password }}"
   register: registries_config
   no_log: true
 

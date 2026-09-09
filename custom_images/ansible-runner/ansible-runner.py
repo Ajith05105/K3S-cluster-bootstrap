@@ -28,12 +28,6 @@ KUBE_VIP_VIP = os.environ.get("KUBE_VIP_VIP", "").strip()
 # this is the only place they get a persistent time source.
 NTP_SERVER = os.environ.get("NTP_SERVER", "").strip()
 
-# Dedicated, non-admin Gitea account (created by roles/bootstrap_gitops) used
-# only so agent nodes can pull images from the registry
-
-REGISTRY_PULLER_USERNAME = "registry-puller"
-REGISTRY_PULLER_PASSWORD = os.environ.get("REGISTRY_PULLER_PASSWORD", "").strip()
-
 # How often to re-check every registry entry against reality. Lower means
 # drift (re-flashed board, dead node, failed provision) is noticed sooner, at
 # the cost of more SSH probes per node per hour.
@@ -189,6 +183,7 @@ def get_gitea_clusterip(api):
 
 
 def registries_yaml_content(cluster_ip):
+   
     return (
         "mirrors:\n"
         f'  "{REGISTRY_HOST}":\n'
@@ -198,9 +193,6 @@ def registries_yaml_content(cluster_ip):
         f'  "{REGISTRY_HOST}":\n'
         "    tls:\n"
         "      insecure_skip_verify: true\n"
-        "    auth:\n"
-        f'      username: "{REGISTRY_PULLER_USERNAME}"\n'
-        f'      password: "{REGISTRY_PULLER_PASSWORD}"\n'
     )
 
 
