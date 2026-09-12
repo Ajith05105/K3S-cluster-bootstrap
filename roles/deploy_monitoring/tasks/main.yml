@@ -1,0 +1,86 @@
+- name: Copy vendored kube-prometheus-stack chart to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/monitoring/kube-prometheus-stack/"
+    dest: "/home/{{ ansible_user }}/kube-prometheus-stack"
+    mode: '0755'
+
+- name: Copy monitoring values file to server
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../manifests/monitoring/values.yaml"
+    dest: "/home/{{ ansible_user }}/monitoring-values.yaml"
+    mode: '0644'
+
+- name: Check if monitoring namespace exists
+  ansible.builtin.command: >
+    kubectl get namespace monitoring --ignore-not-found
+  register: monitoring_namespace_check
+  changed_when: false
+
+- name: Create monitoring namespace
+  ansible.builtin.command: kubectl create namespace monitoring
+  when: monitoring_namespace_check.stdout == ""
+
+
+- name: Generate imagePullSecret manifest for Gitea registry
+  ansible.builtin.command: >
+    kubectl create secret docker-registry gitea-registry-pull
+    --docker-server=gitea.cluster.local:3000
+    --docker-username={{ gitea_admin_username }}
+    --docker-password={{ gitea_admin_password }}
+    -n monitoring
+    --dry-run=client -o yaml
+  register: monitoring_pull_secret_manifest
+  no_log: true
+  changed_when: false
+
+- name: Write imagePullSecret manifest to file
+  ansible.builtin.copy:
+    content: "{{ monitoring_pull_secret_manifest.stdout }}"
+    dest: "/home/{{ ansible_user }}/monitoring-registry-pull-secret.yaml"
+    mode: '0600'
+  no_log: true
+
+- name: Apply the imagePullSecret
+  ansible.builtin.command: >
+    kubectl apply -f /home/{{ ansible_user }}/monitoring-registry-pull-secret.yaml
+  register: monitoring_pull_secret_apply
+  changed_when: "'configured' in monitoring_pull_secret_apply.stdout or 'created' in monitoring_pull_secret_apply.stdout"
+
+- name: Remove staged imagePullSecret file from server
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/monitoring-registry-pull-secret.yaml"
+    state: absent
+
+- name: Install or upgrade kube-prometheus-stack via Helm
+  ansible.builtin.command: >
+    helm upgrade --install monitoring /home/{{ ansible_user }}/kube-prometheus-stack
+    --namespace monitoring
+    -f /home/{{ ansible_user }}/monitoring-values.yaml
+    --set prometheus.prometheusSpec.retention={{ prometheus_retention }}
+    --set grafana.ingress.hosts[0]={{ grafana_ingress_host }}
+    --set grafana.adminUser={{ grafana_admin_username }}
+    --set grafana.adminPassword={{ grafana_admin_password }}
+    --timeout 10m
+  become: true
+  no_log: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Wait for Prometheus to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=ready pod
+    -l app.kubernetes.io/name=prometheus
+    -n monitoring --timeout=300s
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Wait for Grafana to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=available deployment/monitoring-grafana
+    -n monitoring --timeout=300s
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false

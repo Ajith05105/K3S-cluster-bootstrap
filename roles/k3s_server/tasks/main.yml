@@ -41,6 +41,7 @@
     {{ k3s_install_script_dest }} server
     --tls-san {{ kube_vip_vip }}
     --node-ip {{ ansible_host }}
+    --disable servicelb
   environment:
     INSTALL_K3S_SKIP_DOWNLOAD: "true"
     K3S_TOKEN: "{{ k3s_token }}"

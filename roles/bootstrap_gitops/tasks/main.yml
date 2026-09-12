@@ -107,6 +107,7 @@
     rsync -a --no-g --no-o --delete
     --exclude=argocd/argo-cd
     --exclude=gitea/gitea
+    --exclude=monitoring/kube-prometheus-stack
     -e ssh
     {{ role_path }}/../../manifests/
     {{ ansible_user }}@{{ ansible_host }}:/home/{{ ansible_user }}/cluster-config-push/

@@ -49,6 +49,15 @@
     mode: '0644'
 
 
+- name: Copy monitoring image tars to server
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ k3s_airgap_images_dir }}/{{ item | basename }}"
+    mode: '0644'
+  with_fileglob:
+    - /tmp/k3s-images/monitoring-*.tar
+
+
 - name: Copy helm binary to server
   ansible.builtin.copy:
     src: /tmp/k3s-images/helm

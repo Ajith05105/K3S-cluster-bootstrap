@@ -61,7 +61,7 @@ k3s_token: changeme
 
 # Pinned k3s release. The binary and the air-gap image bundle are both
 # downloaded at this tag, so it must be a real k3s release tag.
-k3s_version: "v1.36.0+k3s1"
+k3s_version: "v1.36.4+k3s1"
 
 
 # === Network — bootstrap ===================================================
@@ -180,4 +180,19 @@ redis_version: "8.2.3-alpine"
 # preflight.yml, which renders the vendored chart and pulls exactly what it
 # asks for — so image tags can never drift from the chart. Bumping this one
 # value upgrades the whole stack coherently.
-kube_prometheus_chart_version: "77.6.2"
+kube_prometheus_chart_version: "90.0.0"
+
+# How long Prometheus keeps metrics history. Storage is on local-path-provisioner
+# (node-local disk, no RWX — see roles/deploy_monitoring), so this is purely a
+# retention/disk-usage knob, not a durability guarantee.
+prometheus_retention: "7d"
+
+# Same DNS/Ingress pattern as gitea.cluster.local and argocd.cluster.local —
+# resolved the same way (see README), routed through the same Traefik LB.
+grafana_ingress_host: grafana.cluster.local
+
+# Grafana admin login. Passed via --set on the helm command (see
+# roles/deploy_monitoring), never baked into manifests/monitoring/values.yaml,
+# so it never ends up committed to git.
+grafana_admin_username: admin
+grafana_admin_password: changeme-pick-your-own

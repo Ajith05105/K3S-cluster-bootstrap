@@ -330,6 +330,73 @@
         --untardir {{ playbook_dir }}/../manifests/argocd
       when: not vendored_argocd_chart.stat.exists
 
+    - name: Check if kube-prometheus-stack chart is already vendored
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../manifests/monitoring/kube-prometheus-stack/Chart.yaml"
+      register: vendored_monitoring_chart
+
+    - name: Pull and unpack the kube-prometheus-stack Helm chart
+      ansible.builtin.command: >
+        helm pull kube-prometheus-stack
+        --repo https://prometheus-community.github.io/helm-charts
+        --version {{ kube_prometheus_chart_version }}
+        --untar
+        --untardir {{ playbook_dir }}/../manifests/monitoring
+      when: not vendored_monitoring_chart.stat.exists
+
+    # Only the chart version is pinned (all.yml) — the individual image tags
+    # inside it are NOT, so unlike every other pull in this file there's no
+    # fixed list to write tasks against. Instead: render the chart with the
+    # same values deploy_monitoring will actually use, pull every distinct
+    # image the render references, and stage each as its own tar. This means
+    # bumping kube_prometheus_chart_version alone re-derives the correct
+    # image set automatically, with nothing here to keep in sync by hand.
+    - name: Check if kube-prometheus-stack images are already staged
+      ansible.builtin.stat:
+        path: /tmp/k3s-images/monitoring-images.json
+      register: monitoring_images_staged
+
+    # Deliberately renders with the chart's OWN shipped defaults only — no
+    # -f manifests/monitoring/values.yaml. That override file redirects every
+    # image to gitea.cluster.local, so rendering with it applied would
+    # "discover" already-redirected refs and try to skopeo-pull them from
+    # Gitea before anything's ever been pushed there (chicken-and-egg on a
+    # from-scratch bootstrap, since values.yaml is committed to git as-is).
+    # Rendering pristine defaults is the only reliable way back to the real
+    # upstream refs, since Gitea's admin/<path> naming drops the original
+    # registry host and can't be reverse-mapped from the path alone.
+    - name: Render kube-prometheus-stack chart to disk for image discovery
+      ansible.builtin.shell: >
+        helm template monitoring {{ playbook_dir }}/../manifests/monitoring/kube-prometheus-stack
+        --namespace monitoring
+        > /tmp/k3s-images/monitoring-rendered.yaml
+      when: not monitoring_images_staged.stat.exists
+      changed_when: false
+
+  
+    - name: Discover kube-prometheus-stack's actual image set
+      ansible.builtin.shell: >
+        { grep -oE 'image: "?[A-Za-z0-9._/:-]+"?' /tmp/k3s-images/monitoring-rendered.yaml | sed -E 's/^image: "?//; s/"$//' ;
+        grep -oE -- '--prometheus-config-reloader=[A-Za-z0-9._/:-]+' /tmp/k3s-images/monitoring-rendered.yaml | sed -E 's/^--prometheus-config-reloader=//' ; }
+        | sort -u
+      register: monitoring_images_rendered
+      when: not monitoring_images_staged.stat.exists
+      changed_when: false
+
+    - name: Pull each discovered kube-prometheus-stack image for arm64
+      ansible.builtin.command: >
+        skopeo copy --override-os linux --override-arch arm64
+        docker://{{ item }}
+        docker-archive:/tmp/k3s-images/monitoring-{{ item | regex_replace('[^A-Za-z0-9]+', '-') }}.tar:{{ item }}
+      loop: "{{ monitoring_images_rendered.stdout_lines | default([]) }}"
+      when: not monitoring_images_staged.stat.exists
+
+    - name: Record the staged image set so this whole block can be skipped next run
+      ansible.builtin.copy:
+        dest: /tmp/k3s-images/monitoring-images.json
+        content: "{{ monitoring_images_rendered.stdout_lines | default([]) | to_nice_json }}"
+      when: not monitoring_images_staged.stat.exists
+
     # crane is unrelated to this pull/build split — it PUSHES local tars into
     # Gitea's registry (see push_argocd_images_to_gitea), it never pulls from
     # upstream, so it stays exactly as it was.
@@ -366,6 +433,47 @@
         mode: '0755'
         remote_src: true
       when: not crane_binary_staged.stat.exists
+
+    # k3s itself (binary, install script, airgap image bundle) — these were
+    # never actually staged by this playbook; copy_binaries has always
+    # expected them to already be sitting in /tmp, staged by hand. Automating
+    # it here closes that gap. Version-pinned to k3s_version, same variable
+    # k3s_server uses to run the install script.
+    - name: Check if k3s binary is already staged
+      ansible.builtin.stat:
+        path: /tmp/k3s
+      register: k3s_binary_staged
+
+    - name: Download k3s binary (arm64)
+      ansible.builtin.get_url:
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version }}/k3s-arm64"
+        dest: /tmp/k3s
+        mode: '0755'
+      when: not k3s_binary_staged.stat.exists
+
+    - name: Check if k3s install script is already staged
+      ansible.builtin.stat:
+        path: /tmp/k3s-install.sh
+      register: k3s_install_script_staged
+
+    - name: Download k3s install script
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s-install.sh
+        mode: '0755'
+      when: not k3s_install_script_staged.stat.exists
+
+    - name: Check if k3s airgap image bundle is already staged
+      ansible.builtin.stat:
+        path: /tmp/k3s-airgap-images-arm64.tar.zst
+      register: k3s_airgap_bundle_staged
+
+    - name: Download k3s airgap image bundle (arm64)
+      ansible.builtin.get_url:
+        url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version }}/k3s-airgap-images-arm64.tar.zst"
+        dest: /tmp/k3s-airgap-images-arm64.tar.zst
+        mode: '0644'
+      when: not k3s_airgap_bundle_staged.stat.exists
 
     - name: Stop Podman machine
       ansible.builtin.command: podman machine stop

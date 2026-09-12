@@ -8,11 +8,14 @@
     - deploy_ansible_runner
     - deploy_gitea
 
-- name: Push ArgoCD images and deploy ArgoCD
+- name: Push images and deploy ArgoCD + monitoring
   hosts: "{{ groups['server'][0] }}"
   become: true
   roles:
     - push_argocd_images_to_gitea
+    - deploy_argocd
+    - push_monitoring_images_to_gitea
+    - deploy_monitoring
     - bootstrap_gitops
 
 - name: Configure container registry mirror on all nodes

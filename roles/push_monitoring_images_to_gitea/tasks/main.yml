@@ -1,0 +1,34 @@
+---
+
+
+- name: Get Gitea's in-cluster ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea-http -n gitea -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  changed_when: false
+
+- name: Authenticate crane against the Gitea registry
+  ansible.builtin.command: >
+    crane auth login {{ gitea_cluster_ip.stdout }}:3000
+    -u {{ gitea_admin_username }}
+    -p {{ gitea_admin_password }}
+  no_log: true
+  changed_when: false
+
+# Same list preflight.yml rendered and staged tars for — read back rather
+# than re-derived, so the push can never drift from what was actually staged.
+- name: Load the discovered monitoring image list
+  ansible.builtin.set_fact:
+    monitoring_images: "{{ lookup('file', '/tmp/k3s-images/monitoring-images.json') | from_json }}"
+
+- name: Push each monitoring image to Gitea registry via crane
+  ansible.builtin.command: >
+    crane push /var/lib/rancher/k3s/agent/images/monitoring-{{ item | regex_replace('[^A-Za-z0-9]+', '-') }}.tar
+    {{ gitea_cluster_ip.stdout }}:3000/admin/{{ (item.rsplit(':', 1)[0]).split('/', 1)[1] }}:{{ item.rsplit(':', 1)[1] }}
+    --insecure
+  loop: "{{ monitoring_images }}"
+  register: crane_push_monitoring
+  until: crane_push_monitoring.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: true
