@@ -47,9 +47,6 @@
     dest: "/home/{{ ansible_user }}/argocd-values.yaml"
     mode: '0644'
 
-# configs.secret.argocdServerAdminPassword expects a bcrypt hash, ident 2a
-# specifically — matches what the chart's own comment shows (htpasswd's 2y
-# output converted to 2a); Ansible's password_hash('bcrypt') defaults to 2b.
 - name: Install or upgrade ArgoCD via Helm
   ansible.builtin.command: >
     helm upgrade --install argocd /home/{{ ansible_user }}/argocd-chart
@@ -57,8 +54,35 @@
     --create-namespace
     -f /home/{{ ansible_user }}/argocd-values.yaml
     --set global.image.tag={{ argocd_version }}
-    --set configs.secret.argocdServerAdminPassword={{ argocd_admin_password | password_hash('bcrypt', ident='2a') }}
   become: true
-  no_log: true
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+# Setting the password via Helm's configs.secret.argocdServerAdminPassword
+# instead conflicts on every upgrade after the first: argocd-server claims
+# field ownership of admin.password / admin.passwordMtime on argocd-secret
+# the first time it bootstraps a password in there itself, and Helm's own
+# apply then fights it for ownership of those same two fields. Patching the
+# Secret directly — the same approach ArgoCD's own docs recommend for
+# resetting the admin password — sidesteps that conflict entirely, and
+# argocd-server only ever sets these fields itself when they're empty, so it
+# won't fight back once they hold a real value. ident=2a matches what the
+# chart's own comment shows (htpasswd's 2y output converted to 2a); Ansible's
+# password_hash('bcrypt') defaults to 2b.
+- name: Set ArgoCD's own dashboard admin password directly on argocd-secret
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - -n
+      - "{{ argocd_namespace }}"
+      - patch
+      - secret
+      - argocd-secret
+      - --type
+      - merge
+      - -p
+      - "{{ {'stringData': {'admin.password': argocd_admin_password | password_hash('bcrypt', ident='2a'), 'admin.passwordMtime': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ')}} | to_json }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  no_log: true
+  changed_when: true

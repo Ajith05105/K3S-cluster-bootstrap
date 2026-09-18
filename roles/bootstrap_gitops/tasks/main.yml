@@ -73,13 +73,19 @@
     recurse: true
   ignore_errors: true
 
+# This is delegated to localhost, so it bypasses Ansible's own connection
+# handling entirely (which is what otherwise transparently knows to use
+# ansible_port for a non-default SSH port). Has to be told the port itself,
+# or it silently falls back to 22 — fine on a LAN with direct SSH access,
+# broken the moment the server's only reachable through a forwarded port
+# (e.g. the Tailscale gateway setup, where server-1's real port is 2203, not 22).
 - name: Sync manifests directory to server via rsync (fast, excludes vendored charts)
   ansible.builtin.command: >
     rsync -a --no-g --no-o --delete
     --exclude=argocd/argo-cd
     --exclude=gitea/gitea
     --exclude=monitoring/kube-prometheus-stack
-    -e ssh
+    -e "ssh -p {{ ansible_port | default(22) }}"
     {{ role_path }}/../../manifests/
     {{ ansible_user }}@{{ ansible_host }}:/home/{{ ansible_user }}/cluster-config-push/
   delegate_to: localhost
