@@ -51,7 +51,7 @@
       network:
         version: 2
         ethernets:
-          eth0:
+          {{ kube_vip_interface }}:
             dhcp4: false
             addresses:
               - {{ ansible_host }}/24

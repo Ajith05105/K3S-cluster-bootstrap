@@ -6,7 +6,7 @@ metadata:
 data:
   dnsmasq.conf: |
     port=0
-    interface=eth0
+    interface={{ kube_vip_interface }}
     bind-interfaces
     dhcp-range={{ cluster_dhcp_range_start }},{{ cluster_dhcp_range_end }},{{ cluster_dhcp_lease_time | default('infinite') }}
     dhcp-leasefile=/var/lib/dnsmasq/dnsmasq.leases
