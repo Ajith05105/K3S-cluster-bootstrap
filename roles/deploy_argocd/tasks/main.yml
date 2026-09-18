@@ -47,6 +47,9 @@
     dest: "/home/{{ ansible_user }}/argocd-values.yaml"
     mode: '0644'
 
+# configs.secret.argocdServerAdminPassword expects a bcrypt hash, ident 2a
+# specifically — matches what the chart's own comment shows (htpasswd's 2y
+# output converted to 2a); Ansible's password_hash('bcrypt') defaults to 2b.
 - name: Install or upgrade ArgoCD via Helm
   ansible.builtin.command: >
     helm upgrade --install argocd /home/{{ ansible_user }}/argocd-chart
@@ -54,6 +57,8 @@
     --create-namespace
     -f /home/{{ ansible_user }}/argocd-values.yaml
     --set global.image.tag={{ argocd_version }}
+    --set configs.secret.argocdServerAdminPassword={{ argocd_admin_password | password_hash('bcrypt', ident='2a') }}
   become: true
+  no_log: true
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
