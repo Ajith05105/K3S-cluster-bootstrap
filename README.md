@@ -1,10 +1,9 @@
 # k3s Cluster Bootstrap Playbook
 
 Automated bare-metal K3s cluster deployment on Raspberry Pi 5, with a full
-GitOps platform (Gitea + ArgoCD) and a multi-tenant security model on top.
-One command takes you from powered-off Pis to a self-healing, HA control
-plane; a second gets Gitea, ArgoCD, and tenant isolation running, all
-version-controlled and self-syncing after that.
+GitOps platform (Gitea + ArgoCD) on top. One command takes you from
+powered-off Pis to a self-healing, HA control plane; a second gets Gitea and
+ArgoCD running, all version-controlled and self-syncing after that.
 
 ## How It Works
 
@@ -14,20 +13,13 @@ ansible-playbook playbooks/site.yml
         ├── preflight.yml               → build custom ARM64 images + vendor Helm charts on laptop
         ├── prepare_nodes.yml           → DHCP → discover Pis → static IP + cgroups
         ├── bootstrap_control_plane.yml → install k3s HA cluster + kube-vip (serial)
-        └── deploy_platform.yml         → Gitea, ArgoCD, registry mirror, tenants, GitOps bootstrap
+        └── deploy_platform.yml         → Gitea, ArgoCD, monitoring, registry mirror, GitOps bootstrap
 ```
 
 After `deploy_platform.yml` completes, the laptop can be unplugged. The cluster
 runs its own DHCP server, auto-joins new nodes when they boot, and syncs
 itself against a Git repo — no human intervention needed for day-to-day
 operation.
-
-For tenant-only changes (adding/editing a tenant, without touching the rest
-of the platform), there's a fast path that skips the full redeploy:
-
-```bash
-ansible-playbook playbooks/sync_tenants.yml
-```
 
 ## Requirements
 
@@ -147,8 +139,7 @@ To run individual stages:
 ansible-playbook playbooks/preflight.yml               # build images + vendor charts only
 ansible-playbook playbooks/prepare_nodes.yml           # DHCP + discovery + node prep
 ansible-playbook playbooks/bootstrap_control_plane.yml # k3s + kube-vip install
-ansible-playbook playbooks/deploy_platform.yml         # Gitea, ArgoCD, tenants, GitOps
-ansible-playbook playbooks/sync_tenants.yml            # tenants only, fast path
+ansible-playbook playbooks/deploy_platform.yml         # Gitea, ArgoCD, monitoring, GitOps
 ```
 
 ## Self-Healing Agent Join
@@ -218,9 +209,9 @@ pull it from until it's already running.
 **Registry mirroring**: every node trusts `gitea.cluster.local:3000` as a
 registry mirror (`configure_registry`). ArgoCD, Gitea's own images, and
 dex/redis are all crane-pushed into it during deploy, so the cluster never
-depends on live internet access to pull its own platform images. Anything a
-*tenant* pulls (their own app images) works the same way, through their own
-Gitea registry namespace.
+depends on live internet access to pull its own platform images. Any app
+deployed after the fact pulls its own images the same way, through whichever
+Gitea account pushed them.
 
 **ArgoCD** (`manifests/argocd/`) is deployed via Helm, images pointed at the
 Gitea mirror, pinned to control-plane nodes. Credentials for pulling from
@@ -235,23 +226,23 @@ actually watches. `bootstrap_gitops` force-pushes this repo's own
 the real source of truth; Gitea is a mirror of it, never edited directly.
 
 ArgoCD self-adopts `dnsmasq`, `kube-vip`, and `ansible-runner` as genuine,
-self-healing Applications watching their own paths in `cluster-config` — the
-same pattern proven with tenants. Gitea and ArgoCD's own installation are the
-two remaining components managed imperatively by Ansible, and that's a
-permanent floor, not a gap: neither can GitOps-manage its own first
-deployment before it exists to do the managing.
+self-healing Applications watching their own paths in `cluster-config`.
+Gitea and ArgoCD's own installation are the two remaining components managed
+imperatively by Ansible, and that's a permanent floor, not a gap: neither
+can GitOps-manage its own first deployment before it exists to do the
+managing.
 
 **Pushing images to Gitea's registry** is always a command, for any
 registry anywhere — no registry, Gitea included, offers a browser upload for
 image layers, since the push protocol negotiates layers individually rather
 than sending one file. From any machine with `gitea.cluster.local` in its
-hosts file (the bootstrap laptop gets this automatically; a tenant's own
-machine needs the same one-time entry), pushing is the same standard
-workflow as any other registry:
+hosts file (the bootstrap laptop gets this automatically; any other machine
+needs the same one-time entry), pushing is the same standard workflow as any
+other registry:
 
 ````bash
-podman login gitea.cluster.local -u <tenant> -p <password>
-podman push <image> gitea.cluster.local/<tenant>/app:<tag>
+podman login gitea.cluster.local -u <username> -p <password>
+podman push <image> gitea.cluster.local/<username>/app:<tag>
 ````
 
 Since Gitea serves plain HTTP (see Known Limitations), any pushing machine
@@ -267,39 +258,6 @@ insecure = true
 { "insecure-registries": ["gitea.cluster.local"] }
 ````
 
-## Multi-Tenant Security Model
-
-Tenants interact with the cluster **only** through Git — no `kubectl`, no
-SSH, no direct cluster access at all. Their blast radius is exactly their
-own namespace, enforced by four independent controls, each individually
-tested against a real attack, not just declared:
-
-- **PodSecurity** (`restricted` profile) — no root, no privilege escalation, capabilities dropped. Rejects a non-compliant pod outright, before it's even created.
-- **ResourceQuota + LimitRange** — a hard per-namespace ceiling, plus sane per-container defaults so tenants don't need to know Kubernetes resource syntax. Both are configurable per tenant (see below).
-- **NetworkPolicy** — default-deny, with narrow allows for DNS, inbound via Traefik, and outbound to the Gitea registry. Verified empirically: a tenant pod is refused reaching another namespace; the same command from a platform pod succeeds.
-- **AppProject** — the GitOps-specific boundary. Locks a tenant's `Application` to their own repo and namespace, and blocks them from creating cluster-scoped resources *or* tampering with their own quota/NetworkPolicy from inside their own repo. Tested directly: a real `git push` containing a cross-namespace Deployment and a cluster-admin `ClusterRole` was rejected by ArgoCD by name, with the specific rule that caught each one.
-
-**Onboarding a tenant** is a one-line file, not a folder of duplicated YAML:
-
-```bash
-cat > manifests/tenants/declarations/bob.yaml << EOF
-tenantName: bob
-memRequest: "128Mi"
-memLimit: "256Mi"
-cpuRequest: "100m"
-cpuLimit: "200m"
-EOF
-git add manifests/tenants/declarations/bob.yaml
-git commit -m "feat: onboard bob"
-ansible-playbook playbooks/sync_tenants.yml
-```
-
-That's rendered through one shared chart (`manifests/tenants/_chart/`) by an
-ArgoCD `ApplicationSet`, which also triggers `bootstrap_gitops` to create
-bob's Gitea account and personal `app` repo automatically, with a randomly
-generated password stored as a Kubernetes Secret — never hardcoded, never
-committed, same pattern ArgoCD itself uses for its own admin password.
-
 ## Project Structure
 
 ```
@@ -309,24 +267,20 @@ committed, same pattern ArgoCD itself uses for its own admin password.
 │   ├── preflight.yml                # build images, vendor Helm charts
 │   ├── prepare_nodes.yml            # DHCP, discovery, node prep
 │   ├── bootstrap_control_plane.yml  # k3s + kube-vip install
-│   ├── deploy_platform.yml          # dnsmasq, ansible-runner, Gitea, ArgoCD, tenants
-│   └── sync_tenants.yml             # tenants-only fast path
+│   └── deploy_platform.yml          # dnsmasq, ansible-runner, Gitea, ArgoCD, monitoring
 ├── roles/
 │   ├── laptop_dhcp/, node_prep/, copy_binaries/, k3s_server/
 │   ├── deploy_kube_vip/             # HA VIP + LoadBalancer support
 │   ├── platform_configmaps/, deploy_dnsmasq/, deploy_ansible_runner/
 │   ├── deploy_gitea/, configure_registry/
 │   ├── push_argocd_images_to_gitea/, deploy_argocd/
-│   └── bootstrap_gitops/            # cluster-config repo, tenant onboarding
+│   └── bootstrap_gitops/            # cluster-config repo, platform Applications
 ├── custom_images/
 │   ├── dnsmasq/, lease-watcher/, ansible-runner/
 ├── manifests/
 │   ├── dnsmasq/, ansible-runner/
 │   ├── gitea/                       # values.yaml (chart vendored, gitignored)
-│   ├── argocd/                      # values.yaml (chart vendored, gitignored)
-│   └── tenants/
-│       ├── _chart/                  # shared Helm chart for every tenant
-│       └── declarations/            # one file per tenant
+│   └── argocd/                      # values.yaml (chart vendored, gitignored)
 ├── scripts/discovery.py
 └── inventories/production/
     ├── hosts.yml                    # auto-generated — gitignored
@@ -340,16 +294,16 @@ committed, same pattern ArgoCD itself uses for its own admin password.
 - Joining additional control-plane nodes via `bootstrap_control_plane.yml` still uses server-1's raw IP, not kube-vip's VIP — true HA join isn't wired up on that path, even though kube-vip is running and serving LoadBalancer IPs correctly. (The `ansible-runner` control-plane path *does* join via the VIP, but is untested — see Self-Healing Agent Join.)
 - `gitea.cluster.local` resolves via an `/etc/hosts` entry written on each node, with Gitea's ClusterIP baked into `registries.yaml` at deploy time. Image pulls happen in containerd on the node, which doesn't use CoreDNS, so the in-cluster service name isn't usable there. The consequence: if Gitea's Service is ever recreated it gets a new ClusterIP, and every node silently points at a dead address until `configure_registry` runs again. Nothing detects this.
 - ArgoCD and Gitea are both served over plain HTTP, no TLS. Deliberate for now, not an oversight — this is a physically access-controlled LAN, not a publicly exposed service, and self-signed certs would add complexity without a real threat they'd defend against here. Worth revisiting with cert-manager + an internal CA if that changes.
-- Kubernetes Secrets in etcd are base64-encoded, not encrypted at rest (k3s's default). Every credential this project generates — tenant passwords included — lives there. Enabling `--secrets-encryption` needs reinstalling k3s server-side, so it's a real, separate task, not a quick patch.
+- Kubernetes Secrets in etcd are base64-encoded, not encrypted at rest (k3s's default). Every credential this project generates lives there. Enabling `--secrets-encryption` needs reinstalling k3s server-side, so it's a real, separate task, not a quick patch.
 - **Time is the single most load-bearing dependency in this project, and it still isn't fully solved.** Nodes are now pointed at `cluster_ntp_server` (via `node_prep`, via `ansible-runner` for self-joined agents, and via DHCP option 42), with `systemd-timesyncd` enabled so it survives reboots — but *something has to actually serve NTP at that address*, and standing that up is still on you. Run it **outside** the cluster (the NAT-router Pi), with chrony's `local stratum 10` set so it keeps serving when the internet is down; an in-cluster NTP server would need correct time to bootstrap the thing that provides correct time. Why this matters more than it sounds: a wrong clock doesn't look like a clock problem. It surfaces as TLS failures, ServiceAccount tokens rejected as "not yet valid", agents stuck in `activating`, and API 401s — every symptom pointing somewhere other than the cause. Two control-plane nodes once sat 23 days in the past for three weeks, silently taking the node-join pipeline down with them.
 - **The Pi 5's RTC has no battery by default**, so every reboot starts from whatever stale timestamp systemd last saved. `hwclock -w` is already called during provisioning and becomes genuinely useful the moment a battery is fitted — a few dollars, and it closes the reboot gap even with NTP unreachable.
-- A tenant's Gitea login password and the credential ArgoCD uses to keep syncing their repo are currently the same value. Decoupling these (a separate access token for ArgoCD) would let a tenant change their own password without silently breaking their sync — not done yet.
-- The `ApplicationSet` that generates tenants polls Git on its own ~3 minute timer, separate from a normal Application's refresh. A new or edited tenant can take a few minutes to actually take effect. A Gitea webhook would close this gap if onboarding speed ever matters.
 - No backup/snapshot mechanism yet for Gitea's PVC (repos + registry data) — local-path storage, single node, no redundancy. Real HA is likely not worth the complexity here (Gitea's SQLite backend is single-writer regardless); a periodic backup is the right-sized fix and is planned.
 
 ## Hardware
 
 Tested on:
 - Raspberry Pi 5 (ARM64, 8GB) × 3 control-plane nodes, plus a 4th Pi acting as NAT router for the LAN (not part of the k3s cluster itself)
-- Ubuntu Server 24.04 LTS
+- That 4th Pi also runs **Tailscale**, which is what makes the cluster reachable from outside the LAN — without it, admin access only works from a laptop physically on the same switch. A router running Tailscale (or an equivalent) is a real requirement if you want to manage the cluster wirelessly / remotely, not just a nice-to-have.
+- Ubuntu Server 24.04 LTS on the Pi 5 nodes
+- Mac mini agents running Fedora Linux Asahi Remix — confirmed to auto-join as agent nodes the same way a Pi does (see Self-Healing Agent Join)
 - Bootstrap laptop: Ubuntu 24.04 with a USB ethernet adapter
