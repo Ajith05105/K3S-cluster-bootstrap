@@ -154,12 +154,6 @@ gitea_admin_username: admin
 # re-running deploy_platform.yml.
 gitea_admin_password: changeme
 
-# Password for the dedicated, non-admin "registry-puller" account bootstrap_gitops
-# creates. Every node's registries.yaml authenticates as this account to pull
-# app images — not the admin account, so a leaked node disk never exposes
-# more than read access to package data. See roles/bootstrap_gitops.
-registry_puller_password: changeme
-
 
 # === ArgoCD =================================================================
 
