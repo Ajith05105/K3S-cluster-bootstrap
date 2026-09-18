@@ -1,0 +1,70 @@
+image:
+  registry: "docker.gitea.com"
+  repository: gitea
+  rootless: true
+
+
+strategy:
+  type: Recreate
+
+
+postgresql:
+  enabled: false
+postgresql-ha:
+  enabled: false
+valkey:
+  enabled: false
+valkey-cluster:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: traefik
+  hosts:
+    - host: gitea.cluster.local
+      paths:
+        - path: /
+
+service:
+  http:
+    clusterIP: ""
+
+persistence:
+  size: 10Gi
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+gitea:
+  admin:
+    existingSecret: gitea-admin-secret
+    passwordMode: keepUpdated
+  config:
+    server:
+      SSH_LISTEN_PORT: 2222
+      DOMAIN: gitea.cluster.local
+      ROOT_URL: "http://gitea.cluster.local:3000/"
+      OFFLINE_MODE: true
+    database:
+      DB_TYPE: sqlite3
+      SQLITE_JOURNAL_MODE: wal
+    session:
+      PROVIDER: db
+    cache:
+      ADAPTER: memory
+    queue:
+      TYPE: level
+    repository:
+      DEFAULT_PRIVATE: private
+    security:
+      INSTALL_LOCK: true
+    service:
+      DISABLE_REGISTRATION: true
+      REQUIRE_SIGNIN_VIEW: true
+    packages:
+      ENABLED: true

@@ -1,0 +1,62 @@
+---
+- name: Get Gitea's in-cluster ClusterIP
+  ansible.builtin.command: >
+    kubectl get svc gitea-http -n gitea -o jsonpath='{.spec.clusterIP}'
+  register: gitea_cluster_ip
+  delegate_to: "{{ groups['server'][0] }}"
+  run_once: true
+  changed_when: false
+
+
+- name: Copy registry reconciliation script
+  ansible.builtin.template:
+    src: sync-registry-mirror.sh.j2
+    dest: /usr/local/bin/sync-registry-mirror.sh
+    mode: '0755'
+
+- name: Install registry reconciliation systemd service
+  ansible.builtin.template:
+    src: k3s-registry-reconcile.service.j2
+    dest: /etc/systemd/system/k3s-registry-reconcile.service
+    mode: '0644'
+  register: registry_reconcile_service
+
+- name: Install registry reconciliation systemd timer (per-server staggered)
+  ansible.builtin.template:
+    src: k3s-registry-reconcile.timer.j2
+    dest: /etc/systemd/system/k3s-registry-reconcile.timer
+    mode: '0644'
+  register: registry_reconcile_timer
+
+- name: Reload systemd if the reconcile units changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: registry_reconcile_service.changed or registry_reconcile_timer.changed
+
+- name: Enable and start the registry reconciliation timer
+  ansible.builtin.systemd:
+    name: k3s-registry-reconcile.timer
+    enabled: true
+    state: started
+
+- name: Write k3s registries.yaml to trust the Gitea registry mirror
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: '0644'
+    content: |
+      mirrors:
+        "gitea.cluster.local:3000":
+          endpoint:
+            - "http://{{ hostvars[groups['server'][0]]['gitea_cluster_ip']['stdout'] }}:3000"
+      configs:
+        "gitea.cluster.local:3000":
+          tls:
+            insecure_skip_verify: true
+  register: registries_config
+  no_log: true
+
+- name: Restart k3s to pick up registry config
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  when: registries_config.changed

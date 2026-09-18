@@ -1,0 +1,7 @@
+[Unit]
+Description=Reconcile k3s registries.yaml against Gitea's current ClusterIP
+After=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sync-registry-mirror.sh

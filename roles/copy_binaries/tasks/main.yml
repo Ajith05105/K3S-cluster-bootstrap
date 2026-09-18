@@ -40,3 +40,51 @@
     src: /tmp/k3s-images/ansible-runner.tar
     dest: "{{ k3s_airgap_images_dir }}/ansible-runner.tar"
     mode: '0644'
+
+
+- name: Copy gitea image tar to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/gitea.tar
+    dest: "{{ k3s_airgap_images_dir }}/gitea.tar"
+    mode: '0644'
+
+
+- name: Copy monitoring image tars to server
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ k3s_airgap_images_dir }}/{{ item | basename }}"
+    mode: '0644'
+  with_fileglob:
+    - /tmp/k3s-images/monitoring-*.tar
+
+
+- name: Copy helm binary to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/helm
+    dest: /usr/local/bin/helm
+    mode: '0755'
+  become: true
+- name: Copy argocd image tar to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/argocd.tar
+    dest: "{{ k3s_airgap_images_dir }}/argocd.tar"
+    mode: '0644'
+
+- name: Copy redis image tar to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/redis.tar
+    dest: "{{ k3s_airgap_images_dir }}/redis.tar"
+    mode: '0644'
+
+- name: Copy dex image tar to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/dex.tar
+    dest: "{{ k3s_airgap_images_dir }}/dex.tar"
+    mode: '0644'
+
+- name: Copy crane binary to server
+  ansible.builtin.copy:
+    src: /tmp/k3s-images/crane
+    dest: /usr/local/bin/crane
+    mode: '0755'
+  become: true

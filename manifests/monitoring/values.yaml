@@ -1,0 +1,109 @@
+# Delta override on top of the vendored chart's own defaults — same pattern
+# as manifests/gitea/values.yaml and manifests/argocd/values.yaml.
+#
+# Checked the chart's own defaults before writing this (it's ~6000 lines):
+# replicas are already 1 everywhere, podDisruptionBudget/verticalPodAutoscaler
+# are already disabled everywhere, and imagePullPolicy is already IfNotPresent
+# on every image that matters (the one exception, Grafana's image-renderer,
+# is disabled by default and unused here) — so none of that needed overriding.
+# The one real gap: every component ships with resources: {} (fully
+# unbounded), which is the actual thing worth fixing on Pi-class hardware.
+#
+#
+global:
+  imagePullSecrets:
+    - name: gitea-registry-pull
+
+grafana:
+  image:
+    registry: gitea.cluster.local:3000
+    repository: admin/grafana/grafana
+  sidecar:
+    image:
+      registry: gitea.cluster.local:3000
+      repository: admin/kiwigrid/k8s-sidecar
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - grafana.cluster.local
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 1Gi
+
+prometheus:
+  prometheusSpec:
+    retention: "7d"
+    image:
+      registry: gitea.cluster.local:3000
+      repository: admin/prometheus/prometheus
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
+alertmanager:
+  alertmanagerSpec:
+    image:
+      registry: gitea.cluster.local:3000
+      repository: admin/prometheus/alertmanager
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 150m
+        memory: 128Mi
+
+prometheusOperator:
+  image:
+    registry: gitea.cluster.local:3000
+    repository: admin/prometheus-operator/prometheus-operator
+
+  prometheusConfigReloader:
+    image:
+      registry: gitea.cluster.local:3000
+      repository: admin/prometheus-operator/prometheus-config-reloader
+  admissionWebhooks:
+    patch:
+      image:
+        registry: gitea.cluster.local:3000
+        repository: admin/jkroepke/kube-webhook-certgen
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 150m
+      memory: 128Mi
+
+kube-state-metrics:
+  image:
+    registry: gitea.cluster.local:3000
+    repository: admin/kube-state-metrics/kube-state-metrics
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 150m
+      memory: 128Mi
+
+prometheus-node-exporter:
+  image:
+    registry: gitea.cluster.local:3000
+    repository: admin/prometheus/node-exporter
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

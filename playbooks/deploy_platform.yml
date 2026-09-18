@@ -6,3 +6,83 @@
     - platform_configmaps
     - deploy_dnsmasq
     - deploy_ansible_runner
+    - deploy_gitea
+  tasks:
+    - name: Get Gitea's in-cluster ClusterIP
+      ansible.builtin.command: >
+        kubectl get svc gitea-http -n gitea -o jsonpath='{.spec.clusterIP}'
+      register: gitea_cluster_ip
+      changed_when: false
+
+    # Kept in a Secret, not a local file — the cluster itself is the one
+    # piece of state that's always around on a re-run, regardless of which
+    # laptop or server node happens to be driving Ansible this time. Same
+    # reasoning as the ansible-runner SSH key Secret.
+    - name: Check if the platform pull token is already stored
+      ansible.builtin.command: >
+        kubectl get secret platform-pull-token -n kube-system -o jsonpath='{.data.token}'
+      register: stored_pull_token
+      changed_when: false
+      failed_when: false
+
+    # Gitea never returns an existing token's value again after creation —
+    # if the Secret above is missing but a same-named token still exists in
+    # Gitea (Secret got wiped independently of Gitea, e.g. namespace
+    # recreated), delete it first so creation below is guaranteed to succeed
+    # rather than failing on a stale name collision.
+    - name: Delete any stale platform-pull-token in Gitea (self-heals a lost Secret)
+      ansible.builtin.uri:
+        url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/users/{{ gitea_admin_username }}/tokens/platform-pull-token"
+        method: DELETE
+        user: "{{ gitea_admin_username }}"
+        password: "{{ gitea_admin_password }}"
+        force_basic_auth: true
+        status_code: [204, 404]
+      when: stored_pull_token.stdout == ""
+      no_log: true
+
+    - name: Create a read:package-scoped admin token for platform image pulls
+      ansible.builtin.uri:
+        url: "http://{{ gitea_cluster_ip.stdout }}:3000/api/v1/users/{{ gitea_admin_username }}/tokens"
+        method: POST
+        user: "{{ gitea_admin_username }}"
+        password: "{{ gitea_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: platform-pull-token
+          scopes: ["read:package"]
+        status_code: [201]
+      register: new_pull_token
+      when: stored_pull_token.stdout == ""
+      no_log: true
+
+    - name: Store the new token in a Secret for future runs
+      ansible.builtin.command: >
+        kubectl create secret generic platform-pull-token
+        -n kube-system
+        --from-literal=token={{ new_pull_token.json.sha1 }}
+      when: stored_pull_token.stdout == ""
+      no_log: true
+
+    - name: Make the token available to later plays as a fact
+      ansible.builtin.set_fact:
+        platform_pull_token: "{{ new_pull_token.json.sha1 if stored_pull_token.stdout == '' else stored_pull_token.stdout | b64decode }}"
+      no_log: true
+
+- name: Push images and deploy ArgoCD + monitoring
+  hosts: "{{ groups['server'][0] }}"
+  become: true
+  roles:
+    - push_argocd_images_to_gitea
+    - deploy_argocd
+    - push_monitoring_images_to_gitea
+    - deploy_monitoring
+    - bootstrap_gitops
+
+- name: Configure container registry mirror on all nodes
+  hosts: server
+  become: true
+  serial: 1
+  roles:
+    - configure_registry
