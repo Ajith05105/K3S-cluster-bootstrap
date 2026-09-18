@@ -26,7 +26,7 @@
     kubectl create secret docker-registry gitea-registry-pull
     --docker-server=gitea.cluster.local:3000
     --docker-username={{ gitea_admin_username }}
-    --docker-password={{ gitea_admin_password }}
+    --docker-password={{ platform_pull_token }}
     -n monitoring
     --dry-run=client -o yaml
   register: monitoring_pull_secret_manifest
