@@ -1,0 +1,39 @@
+---
+# Deliberately NOT run on the node hosting Gitea's PVC. local-path storage is
+# node-local, so a backup written to the same node as Gitea's volume shares
+# its failure mode and protects against nothing.
+- name: Install Gitea backup script
+  ansible.builtin.template:
+    src: gitea-backup.sh.j2
+    dest: /usr/local/bin/gitea-backup.sh
+    mode: '0755'
+  become: true
+
+- name: Install Gitea backup systemd service
+  ansible.builtin.template:
+    src: gitea-backup.service.j2
+    dest: /etc/systemd/system/gitea-backup.service
+    mode: '0644'
+  become: true
+  register: gitea_backup_service
+
+- name: Install Gitea backup systemd timer
+  ansible.builtin.template:
+    src: gitea-backup.timer.j2
+    dest: /etc/systemd/system/gitea-backup.timer
+    mode: '0644'
+  become: true
+  register: gitea_backup_timer
+
+- name: Reload systemd if the backup units changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  when: gitea_backup_service.changed or gitea_backup_timer.changed
+
+- name: Enable and start the Gitea backup timer
+  ansible.builtin.systemd:
+    name: gitea-backup.timer
+    enabled: true
+    state: started
+  become: true

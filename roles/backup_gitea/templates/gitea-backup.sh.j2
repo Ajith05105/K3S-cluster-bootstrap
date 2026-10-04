@@ -1,0 +1,85 @@
+#!/bin/bash
+# Nightly Gitea backup.
+#
+# Streams `gitea dump` straight out over stdout rather than mounting Gitea's
+# PVC. That matters: local-path volumes are pinned to one node, so anything
+# that mounts Gitea's volume must run on the node that already holds it —
+# which would put the backup on the very disk we are protecting against.
+# Streaming lets this run anywhere and write locally.
+#
+# Package data (container images, ~1.8GB) is deliberately excluded. Those
+# images still exist as tarballs in /var/lib/rancher/k3s/agent/images on
+# every node and can be re-pushed with crane, so backing them up nightly
+# would spend SD card space protecting something already duplicated.
+set -euo pipefail
+
+BACKUP_DIR="{{ gitea_backup_dir }}"
+RETAIN={{ gitea_backup_retain }}
+MAX_MB={{ gitea_backup_max_mb }}
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# Refuse to back up onto the same node that holds Gitea's data.
+#
+# local-path volumes are node-pinned, so a backup written to Gitea's own node
+# shares its failure mode exactly — it would be destroyed by the same dead SD
+# card it is supposed to survive. Rather than hardcoding which node backs up,
+# every control-plane node runs this and the one hosting Gitea opts out. That
+# way the backup set self-corrects if Gitea is ever rebuilt onto a different
+# node, instead of silently providing worthless protection.
+GITEA_NODE=$(k3s kubectl get pods -n gitea -l app.kubernetes.io/name=gitea \
+  -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
+
+if [ -z "${GITEA_NODE}" ]; then
+  echo "cannot determine which node hosts Gitea - refusing to back up blindly" >&2
+  exit 1
+fi
+
+if [ "${GITEA_NODE}" = "$(hostname)" ]; then
+  echo "skipping: Gitea runs on this node (${GITEA_NODE}); a backup here would share its disk"
+  exit 0
+fi
+
+mkdir -p "${BACKUP_DIR}"
+OUT="${BACKUP_DIR}/gitea-$(date +%F-%H%M).tar.gz"
+
+# Written to .partial first, then renamed. A dump that fails halfway must
+# never end up sitting in the directory looking like a usable backup —
+# and must never be the file that retention keeps while deleting a good one.
+k3s kubectl exec -n gitea deploy/gitea -c gitea -- \
+  gitea dump -f - --type tar.gz --skip-package-data --skip-log --quiet \
+  > "${OUT}.partial"
+
+# Refuse to keep an unexpectedly large dump.
+#
+# Without this, a repo that balloons (someone commits a model file, a dataset,
+# a video — git keeps it in history forever) would silently produce ever-larger
+# dumps until the disk filled, and the first symptom would be something
+# unrelated breaking. Failing here instead makes it a visible, dated failure on
+# the night it starts, with the partial file discarded rather than retained.
+#
+# NOTE: this surfaces as a failed systemd unit, visible via
+#   systemctl status gitea-backup.service
+# It does NOT notify anyone. node-exporter currently runs without the systemd
+# or textfile collectors, so Prometheus cannot see unit failures. Wiring that
+# up is a separate change to manifests/monitoring/values.yaml.
+# Compared in BYTES, not megabytes. Shell arithmetic is integer-only, so
+# dividing to MB first truncates: a 2,076,122-byte dump becomes "1MB", and
+# `1 -gt 1` is false — the guard silently never fires at the boundary.
+# Caught exactly that way during testing.
+SIZE_BYTES=$(stat -c %s "${OUT}.partial")
+MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
+if [ "${SIZE_BYTES}" -gt "${MAX_BYTES}" ]; then
+  rm -f "${OUT}.partial"
+  echo "dump is ${SIZE_BYTES} bytes (~$(( SIZE_BYTES / 1024 / 1024 ))MB), over the ${MAX_MB}MB limit - refusing to keep it." >&2
+  echo "a repo has likely grown sharply; check for large files committed to git." >&2
+  exit 1
+fi
+
+mv "${OUT}.partial" "${OUT}"
+echo "gitea backup written: ${OUT} ($(du -h "${OUT}" | cut -f1))"
+
+# Retention: keep the newest RETAIN, delete the rest. Only ever matches
+# completed dumps, never .partial files.
+ls -1t "${BACKUP_DIR}"/gitea-*.tar.gz 2>/dev/null \
+  | tail -n +$((RETAIN + 1)) \
+  | xargs -r rm -f

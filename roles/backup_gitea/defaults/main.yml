@@ -1,0 +1,20 @@
+---
+# Where dumps are written. Must be on a node OTHER than the one holding
+# Gitea's PVC — a backup on the same SD card protects against nothing.
+gitea_backup_dir: /var/backups/gitea
+
+# How many dumps to keep. Each is ~2MB today, so 3 costs ~6MB.
+#
+# Deliberately low. Retention multiplies any growth: if someone commits a
+# large binary to a repo, git keeps it in history forever and every dump
+# carries it. At 7 copies a 4.5GB repo would need 31GB of backup space; at 3
+# it needs 13.5GB. Large artifacts belong in the container registry, not git.
+gitea_backup_retain: 3
+
+# When to run. systemd OnCalendar syntax.
+gitea_backup_schedule: "*-*-* 02:30:00"
+
+# Refuse to keep a dump larger than this (MB). Current dumps are ~2MB, so this
+# is ~100x headroom — it catches a repo growing by orders of magnitude, not
+# normal growth. Raise it deliberately if repos legitimately get bigger.
+gitea_backup_max_mb: 200
