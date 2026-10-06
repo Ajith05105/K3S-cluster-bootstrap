@@ -5,19 +5,29 @@
     dest: /tmp/k8s_manifests/dnsmasq-serviceaccount.yml
   register: sa_manifest
 
+# Unconditional on purpose — kubectl apply is idempotent and cheap, and
+# gating this on "did the staged temp file's content change since last run"
+# doesn't track whether the live resource actually exists. Confirmed live
+# (2026-09-08): dnsmasq's Deployment was genuinely missing from the cluster,
+# but a leftover /tmp/k8s_manifests/dnsmasq-deployment.yml from an earlier
+# run matched the freshly-rendered content byte for byte, so this guard
+# skipped the apply and the "Wait for dnsmasq pod" task failed with
+# deployments.apps "dnsmasq" not found.
 - name: Apply dnsmasq serviceaccount and RBAC
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-serviceaccount.yml
-  when: sa_manifest.changed
 
-- name: Copy dnsmasq deployment manifest
-  ansible.builtin.copy:
-    src: "{{ role_path }}/../../manifests/dnsmasq/deployment.yml"
+# template, not copy — this file has {{ dnsmasq_version }} in it, and copy
+# moves bytes verbatim without rendering Jinja at all.
+- name: Render dnsmasq deployment manifest
+  ansible.builtin.template:
+    src: deployment.yml.j2
     dest: /tmp/k8s_manifests/dnsmasq-deployment.yml
   register: deploy_manifest
 
+# Same reasoning as the serviceaccount apply above — unconditional, not
+# gated on the staged file's own diff.
 - name: Apply dnsmasq deployment
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-deployment.yml
-  when: deploy_manifest.changed
 
 - name: Wait for dnsmasq pod to be ready
   ansible.builtin.command: >

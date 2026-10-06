@@ -7,3 +7,6 @@ dhcp-authoritative
 port=0
 no-resolv
 log-dhcp
+{% for host in (groups['server'] | default([])) %}
+dhcp-host={{ hostvars[host]['mac_address'] }},{{ hostvars[host]['ansible_host'] }},infinite
+{% endfor %}

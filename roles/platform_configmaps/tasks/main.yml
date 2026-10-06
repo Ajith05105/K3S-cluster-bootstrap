@@ -16,6 +16,21 @@
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/dnsmasq-config.yaml
   when: dnsmasq_manifest.changed
 
+# Bridges per-site values from all.yml into the cluster for workloads ArgoCD
+# owns. Must be applied before anything consumes it — ansible-runner's
+# Deployment reads two keys from here via configMapKeyRef and will not start
+# without them.
+- name: Generate site config manifest
+  ansible.builtin.template:
+    src: site-config.yaml.j2
+    dest: /tmp/k8s_manifests/site-config.yaml
+    mode: '0600'
+  register: site_config_manifest
+
+- name: Apply site config ConfigMap
+  ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/site-config.yaml
+  when: site_config_manifest.changed
+
 - name: Generate control plane registry manifest
   ansible.builtin.template:
     src: control-plane-registry.yaml.j2

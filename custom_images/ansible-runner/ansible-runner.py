@@ -2,6 +2,9 @@
 
 import base64
 import datetime
+import os
+import time
+
 import paramiko
 from kubernetes import client, config, watch
 
@@ -9,6 +12,26 @@ WORKER_CONFIGMAP = "worker-registry"
 NAMESPACE = "kube-system"
 SSH_USER = "pi"
 SSH_KEY_PATH = "/root/.ssh/ansible_runner_key"
+
+GITEA_NAMESPACE = "gitea" # namespace where gitea pod is hosted
+GITEA_SERVICE = "gitea-http" 
+REGISTRY_HOST = "gitea.cluster.local:3000" # string used to redirect to local registry
+REGISTRIES_YAML_PATH = "/etc/rancher/k3s/registries.yaml"
+
+# kube-vip's control-plane VIP, injected by roles/deploy_ansible_runner.
+# A self-joined server needs this in its serving cert SANs (same as
+# roles/k3s_server does), otherwise kube-vip failing the VIP over to that
+# node breaks HTTPS to the API.
+KUBE_VIP_VIP = os.environ.get("KUBE_VIP_VIP", "").strip()
+
+# LAN NTP server handed to self-joined agents. They never run node_prep, so
+# this is the only place they get a persistent time source.
+NTP_SERVER = os.environ.get("NTP_SERVER", "").strip()
+
+# How often to re-check every registry entry against reality. Lower means
+# drift (re-flashed board, dead node, failed provision) is noticed sooner, at
+# the cost of more SSH probes per node per hour.
+RESYNC_INTERVAL = int(os.environ.get("RESYNC_INTERVAL", "300"))
 
 # Paths on the control plane node (mounted into container via hostPath)
 K3S_BINARY_PATH = "/usr/local/bin/k3s"
@@ -30,6 +53,29 @@ def load_k8s_client():
     return client.CoreV1Api()
 
 
+def get_role(hostname):
+    """Decide the k3s role from the hostname, failing closed.
+
+    Accepts either ordering so the existing fleet naming (server-1, agent-1)
+    and a suffix style (pi5-server, pi4-agent) both work:
+        server-* / *-server -> server
+        agent-*  / *-agent  -> agent
+
+    Anything else raises. We never fall back to "agent", because guessing a
+    role for an unrecognised host is exactly how a control-plane board ends
+    up being rebuilt as a worker.
+    """
+    name = hostname.strip().lower()
+    if name.startswith("server-") or name.endswith("-server"):
+        return "server"
+    if name.startswith("agent-") or name.endswith("-agent"):
+        return "agent"
+    raise ValueError(
+        f"hostname {hostname!r} declares no role "
+        "(expected server-*/*-server or agent-*/*-agent)"
+    )
+
+
 def get_join_token(api):
     secret = api.read_namespaced_secret(
         name="k3s-join-token",
@@ -49,6 +95,35 @@ def get_control_plane_url(api):
     raise Exception("No control plane node found")
 
 
+def control_plane_is_healthy(api):
+    """Pre-flight check before adding a control-plane (etcd voting) member.
+
+    The k8s API gives no direct view of etcd membership, so the cheapest
+    honest proxy is: every node already carrying the control-plane/etcd role
+    must be Ready. Joining a new member while the cluster is already degraded
+    is how "one node down" becomes "quorum lost".
+    """
+    degraded = []
+    for node in api.list_node().items:
+        labels = node.metadata.labels or {}
+        is_cp = ("node-role.kubernetes.io/control-plane" in labels
+                 or "node-role.kubernetes.io/etcd" in labels)
+        if not is_cp:
+            continue
+        ready = next(
+            (c.status for c in (node.status.conditions or []) if c.type == "Ready"),
+            "Unknown",
+        )
+        if ready != "True":
+            degraded.append(f"{node.metadata.name}=Ready:{ready}")
+
+    if degraded:
+        print(f"Control plane degraded ({', '.join(degraded)}) — "
+              "deferring server join until it recovers.")
+        return False
+    return True
+
+
 def parse_workers(cm):
     workers = []
     if not cm.data or not cm.data.get("workers"):
@@ -64,14 +139,115 @@ def parse_workers(cm):
     return workers
 
 
-def is_provisioned(ip):
+def node_is_ready(api, hostname):
+    """Is there already a Ready node with this name in the cluster?
+
+    This is the authoritative answer to "is this a working member", and it is
+    checked before the SSH probe below. Without it, a node that happens to be
+    mid-reboot when the resync fires looks unprovisioned over SSH and would be
+    reinstalled underneath itself.
+    """
+    try:
+        node = api.read_node(name=hostname)
+    except Exception:
+        return False
+    for condition in (node.status.conditions or []):
+        if condition.type == "Ready":
+            return condition.status == "True"
+    return False
+
+
+def get_gitea_clusterip(api):
+    """Gitea's current ClusterIP, or None if the Service doesn't exist yet.
+
+    None (not an exception) is deliberate for a genuine 404: at
+    cluster-bootstrap time this pod can start before deploy_gitea has run, in
+    the same play. That's not an error to surface loudly — it just means
+    there's nothing to sync yet, same as an empty worker-registry isn't an
+    error. Anything else (403 in particular — an RBAC gap, not a timing
+    thing) DOES get printed: this exact silence is what let a missing
+    services/gitea-http grant go unnoticed for hours, since a 403 looked
+    identical to "not up yet" with no log line either way.
+    """
+    try:
+        svc = api.read_namespaced_service(name=GITEA_SERVICE, namespace=GITEA_NAMESPACE)
+        return svc.spec.cluster_ip
+    except client.exceptions.ApiException as e:
+        if e.status != 404:
+            print(f"get_gitea_clusterip failed (not a simple 'not found'): "
+                  f"HTTP {e.status}: {e.reason}")
+        return None
+    except Exception as e:
+        print(f"get_gitea_clusterip failed: {type(e).__name__}: {e}")
+        return None
+
+
+def registries_yaml_content(cluster_ip):
+   
+    return (
+        "mirrors:\n"
+        f'  "{REGISTRY_HOST}":\n'
+        "    endpoint:\n"
+        f'      - "http://{cluster_ip}:3000"\n'
+        "configs:\n"
+        f'  "{REGISTRY_HOST}":\n'
+        "    tls:\n"
+        "      insecure_skip_verify: true\n"
+    )
+
+
+def sync_registry_mirror(ip, hostname, cluster_ip):
+    """Keep an already-Ready agent's registries.yaml pointed at Gitea's
+    current ClusterIP, restarting k3s-agent only if it actually changed.
+
+    """
+    desired = registries_yaml_content(cluster_ip)
+    try:
+        key = paramiko.Ed25519Key.from_private_key_file(SSH_KEY_PATH)
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=SSH_USER, pkey=key, timeout=10)
+
+        _, stdout, _ = ssh.exec_command(f"sudo cat {REGISTRIES_YAML_PATH} 2>/dev/null || true")
+        current = stdout.read().decode()
+
+        if current == desired:
+            ssh.close()
+            return
+
+        write_cmd = (
+            f"sudo mkdir -p $(dirname {REGISTRIES_YAML_PATH}) && "
+            f"cat <<'REGISTRIES_EOF' | sudo tee {REGISTRIES_YAML_PATH} > /dev/null\n"
+            f"{desired}"
+            "REGISTRIES_EOF\n"
+            f"sudo chmod 600 {REGISTRIES_YAML_PATH}"
+        )
+        _, stdout, stderr = ssh.exec_command(write_cmd)
+        write_err = stderr.read().decode().strip()
+        write_code = stdout.channel.recv_exit_status()
+        if write_code != 0:
+            print(f"Failed to update registries.yaml on {hostname}: {write_err}")
+            ssh.close()
+            return
+
+        print(f"registries.yaml updated on {hostname} (Gitea -> {cluster_ip}), "
+              "restarting k3s-agent...")
+        ssh.exec_command("sudo systemctl restart k3s-agent")
+        ssh.close()
+
+    except Exception as e:
+        print(f"Registry sync failed for {hostname} ({ip}): {type(e).__name__}: {e}")
+
+
+def is_provisioned(ip, role):
+    unit = "k3s" if role == "server" else "k3s-agent"
     try:
         key = paramiko.Ed25519Key.from_private_key_file(SSH_KEY_PATH)
         client_ssh = paramiko.SSHClient()
         client_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client_ssh.connect(ip, username=SSH_USER, pkey=key, timeout=10)
         _, stdout, _ = client_ssh.exec_command(
-            "systemctl is-active k3s-agent 2>/dev/null || echo inactive"
+            f"systemctl is-active {unit} 2>/dev/null || echo inactive"
         )
         result = stdout.read().decode().strip()
         client_ssh.close()
@@ -81,10 +257,50 @@ def is_provisioned(ip):
         return False
 
 
-def provision(worker, server_url, token):
+def warn_if_stale_node_record(api, ssh, hostname):
+    """Detect a re-flashed board whose server-side identity is now stale.
+
+    k3s pairs a hostname with a random node password: the machine keeps it in
+    /etc/rancher/node/password, the server keeps a hash in the Secret
+    <hostname>.node-password.k3s. Re-flashing destroys the machine's half; the
+    server's half survives, so registration is refused with "Node password
+    rejected" and k3s-agent sits in "activating" forever.
+
+    Deliberately log-only. Clearing the record means overriding k3s's
+    anti-hostname-squatting check — that is a deliberate operator action, not
+    a standing permission for an unattended pod, so this only tells you the
+    exact command to run.
+    """
+    try:
+        api.read_node(name=hostname)
+    except Exception:
+        return  # no node object for this name — nothing stale
+
+    _, stdout, _ = ssh.exec_command(
+        "test -f /etc/rancher/node/password && echo yes || echo no"
+    )
+    if stdout.read().decode().strip() != "no":
+        return  # machine still holds its half of the pair — consistent
+
+    print(
+        f"WARNING {hostname}: the cluster has a node record, but this machine "
+        f"has no node identity — it looks re-flashed. k3s will install, then "
+        f"registration will be REJECTED until the stale record is cleared:\n"
+        f"    kubectl delete node {hostname}\n"
+        f"    (the node-password Secret is removed with it)\n"
+        f"k3s-agent retries on its own, so the node joins once that is done."
+    )
+
+
+def provision(api, worker, server_url, token, role):
+    """Provision one node. Returns True only if k3s installed successfully.
+
+    The caller relies on this: a failed server join must not be mistaken for a
+    successful one, or an unreachable host consumes the one-join-per-cycle slot.
+    """
     ip = worker["ip"]
     hostname = worker["hostname"]
-    print(f"Provisioning {hostname} ({ip})...")
+    print(f"Provisioning {hostname} ({ip}) as {role}...")
 
     try:
         key = paramiko.Ed25519Key.from_private_key_file(SSH_KEY_PATH)
@@ -92,18 +308,52 @@ def provision(worker, server_url, token):
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(ip, username=SSH_USER, pkey=key, timeout=10)
 
-        # 0. Sync time — critical for TLS cert validation
+        # Pre-flight: surface a stale node record before doing the work, so
+        # the reason for a later registration failure is already in the log.
+        warn_if_stale_node_record(api, ssh, hostname)
+
+        # 0. Sync time — critical for TLS cert validation.
+        #    Seed from this pod's clock so the join works right now, then hand
+        #    the node over to NTP. Seeding alone is what the old code did, and
+        #    it only holds until the next reboot: these Pis have no
+        #    battery-backed RTC, so systemd restores a stale saved timestamp
+        #    and the node silently falls out of the cluster's cert validity
+        #    window with no way back.
         print(f"Syncing time on {hostname}...")
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # UTC explicitly on both sides. `date -s` interprets a bare timestamp
+        # in the TARGET's local timezone, but this pod's clock is UTC — so
+        # sending a UTC value unqualified landed every node off by its UTC
+        # offset (12h on Pacific/Auckland). The node then failed TLS
+        # validation and sat in "activating" forever.
+        # set-ntp false first because systemd refuses manual time changes
+        # while it is managing the clock; the NTP block below re-enables it.
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         _, stdout, stderr = ssh.exec_command(
             f"sudo timedatectl set-ntp false && "
-            f"sudo date -s '{now}' && "
-            f"sudo hwclock -w"
+            f"sudo date -u -s '{now}' && "
+            f"sudo hwclock -w 2>/dev/null || true"
         )
         _ = stdout.read()
         _ = stderr.read()
         stdout.channel.recv_exit_status()
-        print(f"Time synced on {hostname}")
+
+        if NTP_SERVER:
+            _, stdout, stderr = ssh.exec_command(
+                f"sudo mkdir -p /etc/systemd/timesyncd.conf.d && "
+                f"printf '[Time]\\nNTP={NTP_SERVER}\\n' "
+                f"| sudo tee /etc/systemd/timesyncd.conf.d/10-cluster-ntp.conf >/dev/null && "
+                f"sudo systemctl enable systemd-timesyncd && "
+                f"sudo timedatectl set-ntp true"
+            )
+            _ = stdout.read()
+            ntp_err = stderr.read().decode().strip()
+            if stdout.channel.recv_exit_status() == 0:
+                print(f"Time synced on {hostname}, NTP -> {NTP_SERVER}")
+            else:
+                print(f"Time seeded on {hostname}, but NTP setup failed: {ntp_err}")
+        else:
+            print(f"Time seeded on {hostname} (NTP_SERVER unset — clock will "
+                  "drift after reboot)")
 
         # 1. Transfer artifacts safely into /tmp via SFTP
         print(f"Copying k3s artifacts to {hostname}...")
@@ -115,7 +365,6 @@ def provision(worker, server_url, token):
 
         # 2. Move artifacts into system locations atomically
         print("Moving artifacts into system locations...")
-        # FIX 1: Unpack all 3 values (including stdin) to prevent ValueError unpacking crash
         _, stdout, stderr = ssh.exec_command(
             f"sudo mkdir -p {K3S_IMAGES_DIR} && "
             f"sudo mkdir -p /usr/local/bin && "
@@ -125,7 +374,6 @@ def provision(worker, server_url, token):
             f"sudo mv {K3S_AIRGAP_IMAGES_DEST} "
             f"{K3S_IMAGES_DIR}/k3s-airgap-images-arm64.tar.zst"
         )
-        # FIX 2: Capture errors in case the chained file migrations fail
         _ = stdout.read().decode().strip()
         setup_err = stderr.read().decode().strip()
         setup_code = stdout.channel.recv_exit_status()
@@ -133,44 +381,125 @@ def provision(worker, server_url, token):
         if setup_code != 0:
             raise Exception(f"System preparation failed with exit code {setup_code}: {setup_err}")
 
-        # 3. Run install script — sets up systemd service, returns clean exit code
-        print(f"Installing k3s agent on {hostname}...")
-        install_cmd = (
-            f"sudo INSTALL_K3S_SKIP_DOWNLOAD=true "
-            f"K3S_URL={server_url} "
-            f"K3S_TOKEN={token} "
-            f"sh {K3S_INSTALL_SCRIPT_DEST}"
-        )
+        # 3. Run install script — role decides whether this joins as a
+        #    control-plane member or a worker. The server form mirrors
+        #    roles/k3s_server (server + --tls-san + --node-ip).
+        print(f"Installing k3s {role} on {hostname}...")
+        if role == "server":
+            install_cmd = (
+                f"sudo INSTALL_K3S_SKIP_DOWNLOAD=true "
+                f"K3S_URL={server_url} "
+                f"K3S_TOKEN={token} "
+                f"sh {K3S_INSTALL_SCRIPT_DEST} server "
+                f"--tls-san {KUBE_VIP_VIP} "
+                f"--node-ip {ip}"
+            )
+        else:
+            install_cmd = (
+                f"sudo INSTALL_K3S_SKIP_DOWNLOAD=true "
+                f"K3S_URL={server_url} "
+                f"K3S_TOKEN={token} "
+                f"sh {K3S_INSTALL_SCRIPT_DEST}"
+            )
+
         _, stdout, stderr = ssh.exec_command(install_cmd)
-        install_out = stdout.read().decode().strip()
+        _ = stdout.read().decode().strip()
         install_err = stderr.read().decode().strip()
         exit_code = stdout.channel.recv_exit_status()
 
         if exit_code == 0:
-            print(f"Successfully provisioned {hostname}")
-            # FIX 3: Since k3s binary was already moved by step 2, just wipe the unneeded installation script wrapper
+            print(f"Successfully provisioned {hostname} as {role}")
+            # The k3s binary was already moved into place by step 2, so only
+            # the install-script wrapper needs cleaning up.
             ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
-        else:
-            print(f"Failed to provision {hostname}: {stderr.read().decode()}")
+            ssh.close()
+            return True
 
+        print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
         ssh.close()
+        return False
 
     except Exception as e:
-        print(f"Provisioning failed for {hostname}: {e} | Context: {install_err}")
+        # Deliberately references no locals from the try block — a failure
+        # during connect/SFTP happens before install_err/setup_err exist, and
+        # touching them here would raise NameError and mask the real error.
+        print(f"Provisioning failed for {hostname}: {type(e).__name__}: {e}")
+        return False
+
+
+def process_workers(api, cm, server_url, token, gitea_cluster_ip):
+    # At most one control-plane join per cycle — but a FAILED attempt must not
+    # consume that slot, and must not stop agents being processed. This used to
+    # `return` unconditionally after any server attempt, so a single
+    # unreachable host with a server-shaped name (a Mac Mini called
+    # "mac-mini-server") abandoned the whole registry on every cycle and no
+    # agent was ever provisioned again.
+    server_joined = False
+
+    for worker in parse_workers(cm):
+        hostname = worker["hostname"]
+
+        try:
+            role = get_role(hostname)
+        except ValueError as e:
+            print(f"Skipping {hostname} ({worker['ip']}): {e}")
+            continue
+
+        # Cluster state first (cheap, authoritative), SSH only as a fallback
+        # for "is there even k3s on this box" — e.g. a re-flashed board, which
+        # keeps its MAC so it never looks new to lease-watcher.
+        if node_is_ready(api, hostname):
+            # Already joined — the one thing still worth checking on every
+            # cycle is whether its container registry mirror has drifted. Servers get
+            # this from their own local systemd timer; agents have no
+            # kubeconfig of their own, so this pod is the only thing that can
+            # reach them.
+            if role == "agent" and gitea_cluster_ip:
+                sync_registry_mirror(worker["ip"], hostname, gitea_cluster_ip)
+            continue
+        if is_provisioned(worker["ip"], role):
+            continue
+
+        if role == "server":
+            if server_joined:
+                continue
+            if not KUBE_VIP_VIP:
+                print(f"Skipping server join for {hostname}: KUBE_VIP_VIP is "
+                      "unset, so --tls-san would be missing.")
+                continue
+            if not control_plane_is_healthy(api):
+                continue
+            if provision(api, worker, server_url, token, role):
+                # A real member joined. It has to register and go Ready before
+                # control_plane_is_healthy() can answer meaningfully about
+                # adding another, so no further server joins this cycle.
+                server_joined = True
+                print("Server joined — deferring further server joins "
+                      "so etcd settles.")
+            continue
+
+        provision(api, worker, server_url, token, role)
 
 
 def reconcile(api, server_url, token):
+    """Level-triggered sweep: bring every registry entry to desired state.
+
+    Runs on a timer rather than only at startup, because plenty of drift
+    produces no ConfigMap event at all — a re-flashed board (same MAC, so
+    lease-watcher correctly sees nothing new), a failed provision during a pod
+    restart, a manual k3s-uninstall, a dead disk. The watch below is only a
+    latency optimisation on top of this.
+    """
     print("Reconciling existing workers...")
     try:
         cm = api.read_namespaced_config_map(
             name=WORKER_CONFIGMAP,
             namespace=NAMESPACE
         )
-        for worker in parse_workers(cm):
-            if not is_provisioned(worker["ip"]):
-                provision(worker, server_url, token)
+        gitea_cluster_ip = get_gitea_clusterip(api)
+        process_workers(api, cm, server_url, token, gitea_cluster_ip)
     except Exception as e:
-        print(f"Reconciliation error on startup: {e}")
+        print(f"Reconciliation error: {e}")
     print("Reconciliation complete.")
 
 
@@ -181,27 +510,37 @@ def main():
     token = get_join_token(api)
     server_url = get_control_plane_url(api)
     print(f"Control plane: {server_url}")
+    print(f"kube-vip VIP: {KUBE_VIP_VIP or '(unset — server joins disabled)'}")
 
-    # 1. Reconcile on startup — catch nodes added before ansible-runner deployed
-    reconcile(api, server_url, token)
-
-    # 2. Watch for new entries — resilient against stream timeouts
-    print("Watching worker-registry for new nodes...")
+    print(f"Watching worker-registry (resync every {RESYNC_INTERVAL}s)...")
     w = watch.Watch()
     while True:
         try:
+            # Level-triggered: sweep everything, then watch for changes until
+            # the stream times out and drops us back here. New hardware is
+            # picked up in seconds by the watch; anything that drifted without
+            # producing an event is caught by the next sweep.
+            reconcile(api, server_url, token)
             for event in w.stream(
                 api.list_namespaced_config_map,
                 namespace=NAMESPACE,
-                field_selector=f"metadata.name={WORKER_CONFIGMAP}"
+                field_selector=f"metadata.name={WORKER_CONFIGMAP}",
+                timeout_seconds=RESYNC_INTERVAL,
             ):
                 if event["type"] in ["ADDED", "MODIFIED"]:
-                    cm = event["object"]
-                    for worker in parse_workers(cm):
-                        if not is_provisioned(worker["ip"]):
-                            provision(worker, server_url, token)
+                    gitea_cluster_ip = get_gitea_clusterip(api)
+                    process_workers(api, event["object"], server_url, token, gitea_cluster_ip)
         except Exception as e:
+            # A 401 here means the projected ServiceAccount token rotated and
+            # the cached credential went stale. Rebuild the client instead of
+            # spinning on Unauthorized forever, and back off so a persistent
+            # failure doesn't become a hot loop.
             print(f"Watch stream disconnected ({e}), reconnecting...")
+            time.sleep(5)
+            try:
+                api = load_k8s_client()
+            except Exception as reload_err:
+                print(f"Client reload failed: {reload_err}")
 
 
 if __name__ == "__main__":

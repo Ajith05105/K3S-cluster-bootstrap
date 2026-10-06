@@ -1,0 +1,6 @@
+---
+- name: Copy staged binaries and images to server (one-off re-run)
+  hosts: server
+  become: true
+  roles:
+    - copy_binaries

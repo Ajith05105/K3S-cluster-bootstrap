@@ -1,0 +1,19 @@
+[Unit]
+Description=Periodic, per-server-staggered check of k3s registries.yaml
+
+[Timer]
+# Deterministic stagger, not just random jitter: each server's offset comes
+# from its own position in groups['server'], so with 3 servers the effective
+# schedule is :00/:15/:30/:45, :05/:20/:35/:50, :10/:25/:40/:55 — no two
+# servers can ever land in the same 5-minute window by construction. A k3s
+# restart cycles the API server, controller-manager, scheduler and this
+# node's etcd connection; with embedded etcd and 3 members, quorum only needs
+# 2 of 3, but two or three restarting close together threatens that. The
+# stagger guarantees that never happens; RandomizedDelaySec below is just
+# extra margin within each server's own slot, not the primary defense.
+OnCalendar=*:{{ groups['server'].index(inventory_hostname) * 5 }}/15
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
