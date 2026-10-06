@@ -60,3 +60,16 @@
     name: k3s
     state: restarted
   when: registries_config.changed
+
+# The plays after this one talk to the API straight away, so don't hand back
+# a node whose API server is still coming up.
+- name: Wait for API server to come back after the restart
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:6443/healthz"
+    validate_certs: false
+    status_code: [200, 401]
+  register: api_ready
+  retries: 30
+  delay: 10
+  until: api_ready.status in [200, 401]
+  when: registries_config.changed

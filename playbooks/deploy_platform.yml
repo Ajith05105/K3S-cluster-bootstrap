@@ -5,8 +5,10 @@
   roles:
     - platform_configmaps
     - deploy_dnsmasq
-    - deploy_ansible_runner
+    # Before deploy_ansible_runner: the runner's RBAC manifest includes a Role
+    # in the gitea namespace, which this role creates.
     - deploy_gitea
+    - deploy_ansible_runner
   tasks:
     - name: Get Gitea's in-cluster ClusterIP
       ansible.builtin.command: >
@@ -80,6 +82,16 @@
   roles:
     - backup_gitea
 
+# Must run before anything pulls from gitea.cluster.local:3000 — without the
+# mirror in registries.yaml the nodes cannot resolve that name, and ArgoCD's
+# first pod sits in ImagePullBackOff until the Helm install times out.
+- name: Configure container registry mirror on all nodes
+  hosts: server
+  become: true
+  serial: 1
+  roles:
+    - configure_registry
+
 - name: Push images and deploy ArgoCD + monitoring
   hosts: "{{ groups['server'][0] }}"
   become: true
@@ -89,10 +101,3 @@
     - push_monitoring_images_to_gitea
     - deploy_monitoring
     - bootstrap_gitops
-
-- name: Configure container registry mirror on all nodes
-  hosts: server
-  become: true
-  serial: 1
-  roles:
-    - configure_registry

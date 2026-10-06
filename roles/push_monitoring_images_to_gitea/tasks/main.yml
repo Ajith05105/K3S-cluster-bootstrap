@@ -23,7 +23,7 @@
 
 - name: Push each monitoring image to Gitea registry via crane
   ansible.builtin.command: >
-    crane push /var/lib/rancher/k3s/agent/images/monitoring-{{ item | regex_replace('[^A-Za-z0-9]+', '-') }}.tar
+    crane push /var/lib/rancher/k3s/push-images/monitoring-{{ item | regex_replace('[^A-Za-z0-9]+', '-') }}.tar
     {{ gitea_cluster_ip.stdout }}:3000/admin/{{ (item.rsplit(':', 1)[0]).split('/', 1)[1] }}:{{ item.rsplit(':', 1)[1] }}
     --insecure
   loop: "{{ monitoring_images }}"

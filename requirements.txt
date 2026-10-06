@@ -1,2 +1,4 @@
 ansible
 pyyaml
+passlib
+bcrypt<5

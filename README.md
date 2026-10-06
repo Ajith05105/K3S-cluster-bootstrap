@@ -63,15 +63,21 @@ Under **Remote Access**:
 - Enable SSH → public-key only
 - Paste `~/.ssh/id_ed25519.pub`
 
-Before ejecting, open `user-data` on the `system-boot` partition and add passwordless sudo and both public keys:
+Before ejecting, open `user-data` on the `system-boot` partition. The Imager
+has already written a single `user:` block there (not a `users:` list). Make
+two changes inside it:
+
+1. **Replace** the Imager's `sudo: null` line with the passwordless-sudo value.
+2. Add the runner's public key under `ssh_authorized_keys`.
 
 ```yaml
-users:
-  - name: pi
-    sudo: "ALL=(ALL) NOPASSWD:ALL"
-    ssh_authorized_keys:
-      - ssh-ed25519 AAAA...   # id_ed25519.pub — your personal key
-      - ssh-ed25519 BBBB...   # ansible_runner_key.pub — for in-cluster runner
+user:
+  name: pi
+  shell: /bin/bash
+  ssh_authorized_keys:
+    - ssh-ed25519 AAAA...   # id_ed25519.pub — your personal key (written by the Imager)
+    - ssh-ed25519 BBBB...   # ansible_runner_key.pub — add this, for the in-cluster runner
+  sudo: "ALL=(ALL) NOPASSWD:ALL"   # was `sudo: null` — replace it, don't add a second line
 ```
 
 ## Configuration

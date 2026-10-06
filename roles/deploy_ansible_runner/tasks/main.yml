@@ -34,11 +34,11 @@
   ansible.builtin.copy:
     src: "{{ role_path }}/../../manifests/ansible-runner/serviceaccount.yml"
     dest: /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
-  register: runner_sa_manifest
 
+# Applied on every run, not only when the copy above changed — otherwise a
+# failed apply is never retried, because the file is already on the server.
 - name: Apply ansible-runner serviceaccount and RBAC
   ansible.builtin.command: kubectl apply -f /tmp/k8s_manifests/ansible-runner-serviceaccount.yml
-  when: runner_sa_manifest.changed
 
 # The Deployment itself is deliberately NOT applied here. It lives in
 # manifests/ansible-runner/deployment.yml, which bootstrap_gitops syncs into

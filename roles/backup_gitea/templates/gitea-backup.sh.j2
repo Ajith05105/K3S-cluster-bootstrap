@@ -8,7 +8,7 @@
 # Streaming lets this run anywhere and write locally.
 #
 # Package data (container images, ~1.8GB) is deliberately excluded. Those
-# images still exist as tarballs in /var/lib/rancher/k3s/agent/images on
+# images still exist as tarballs in /var/lib/rancher/k3s/push-images on
 # every node and can be re-pushed with crane, so backing them up nightly
 # would spend SD card space protecting something already duplicated.
 set -euo pipefail

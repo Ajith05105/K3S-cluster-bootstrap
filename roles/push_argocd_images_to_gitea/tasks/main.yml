@@ -15,7 +15,7 @@
 
 - name: Push argocd image to Gitea registry via crane
   ansible.builtin.command: >
-    crane push /var/lib/rancher/k3s/agent/images/argocd.tar
+    crane push /var/lib/rancher/k3s/push-images/argocd.tar
     {{ gitea_cluster_ip.stdout }}:3000/admin/argocd:{{ argocd_version }}
     --insecure
   register: crane_push_argocd
@@ -26,7 +26,7 @@
 
 - name: Push redis image to Gitea registry via crane
   ansible.builtin.command: >
-    crane push /var/lib/rancher/k3s/agent/images/redis.tar
+    crane push /var/lib/rancher/k3s/push-images/redis.tar
     {{ gitea_cluster_ip.stdout }}:3000/admin/redis:{{ redis_version }}
     --insecure
   register: crane_push_redis
@@ -37,7 +37,7 @@
 
 - name: Push dex image to Gitea registry via crane
   ansible.builtin.command: >
-    crane push /var/lib/rancher/k3s/agent/images/dex.tar
+    crane push /var/lib/rancher/k3s/push-images/dex.tar
     {{ gitea_cluster_ip.stdout }}:3000/admin/dex:{{ dex_version }}
     --insecure
   register: crane_push_dex
