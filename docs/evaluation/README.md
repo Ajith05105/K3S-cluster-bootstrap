@@ -24,6 +24,7 @@ Every result follows the same structure: *what we did and how → what we measur
 | B | Running VIP (`.60`) **does not match** declared config (`.50`) | [perf](../cluster-performance-testing.md) |
 | **E4** | Resource isolation **enforced**; network and privilege isolation **absent** — tenant pods reach each other and the platform, as root | [E4](E4-tenant-isolation.md) |
 | **E5a** | GitOps drift repaired in **1.5 s** first time, degrading exponentially to a **~300 s** ceiling under repetition | [E5a](E5a-gitops-drift-correction.md) |
+| **E6** | Gitea repos + DB restore in **~30 s**, `git fsck` clean, DB loads fully — but **application images are in no backup** and the dumps are **world-readable with secrets** | [E6](E6-backup-restore.md) |
 | **E8** | Platform costs **201 mCPU / 2.4 GiB** at rest; monitoring alone is **77% of CPU, 61% of memory** | [E8](E8-steady-state-overhead.md) |
 | **E8b** | Asahi Mac minis carry **~1.4 GiB more** idle OS overhead than the Pis, running identical pods | [E8](E8-steady-state-overhead.md) |
 
@@ -46,8 +47,8 @@ Ordered by value, with the two destructive items last.
 
 | Item | Status | Note |
 |---|---|---|
-| **Agent join time** (lease-watcher → ansible-runner, full cycle) | **not done** | The most novel mechanism in the project and still only *estimated* at 3–8 min. Test 8 does **not** cover it — its 11 s starts at node `Ready`. Needs someone physically present to wipe and power-cycle an agent. |
-| **Backup restore** | **not done** | Backups have existed since 4 Oct and are verified valid; **restore has never been exercised.** Must be done before any destructive test, and it rewrites limit L1, which is currently false. |
+| **Agent join time** (lease-watcher → ansible-runner, full cycle) | **done by Ajith** | Pi **169 s** (107.7 s to Ready + 61.6 s to first workload); Mac mini **30 s** (12.5 + 17.5). Mean of 4 runs each, zero manual steps, zero failures. Supersedes the 3–8 min estimate. **Not yet written up here — needs Ajith's raw timings.** |
+| **Backup restore** | **done** — [E6](E6-backup-restore.md) | Restore proven in ~30 s. L1 rewritten. Remaining sub-gap: a *running* Gitea serving restored data was not stood up. |
 | **E5b — kube-vip drift** | **not done** | Confirmed safe to attempt: `platform-kube-vip` manages the RBAC and cloud-provider but **not** the `kube-vip-ds` DaemonSet, so ArgoCD will not restore it. Save the manifest first — deleting it drops the `.61` service VIP and with it all ingress. |
 | **Timed full power loss** | **not done** | Prerequisites now met (NTP synced to a reachable gateway). Real SD-card corruption risk; do only after restore is proven. |
 | **Full rebuild from wiped nodes** (RQ1) | **not done** | Destroys etcd and Gitea's PVC. Cannot be run remotely — `site.yml` includes `prepare_nodes.yml`, which needs laptop DHCP on the cluster's own L2 segment. |

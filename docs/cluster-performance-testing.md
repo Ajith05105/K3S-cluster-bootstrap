@@ -26,7 +26,7 @@ Every section below follows the same structure: **what we did → what we measur
 | 9. Self-healing under load (power cut) | **52s** application outage — of which **47s was Kubernetes not yet noticing** the node was dead |
 | A. Incidental: airgap images | Images are **not uniformly distributed** — a pod can become unschedulable by landing on the wrong node |
 | B. Incidental: VIP config drift | Running VIP (`.60`) **does not match** declared config (`.50`) |
-| L1. Known limit | **Gitea is a single point of failure** — all repos + images on one SD card, no backup |
+| L1. Known limit | **Gitea is a single point of failure** — repos/DB restore in **~30s** (proven), but **app images are unrecoverable** |
 | L2. Known limit | Losing **2 control-plane nodes freezes the cluster** (quorum loss) — qualitatively different from losing 1 |
 
 ---
@@ -727,31 +727,36 @@ Root cause is the same pattern as the stale Gitea chart encountered earlier: `pr
 
 Two structural limits identified during testing. Neither has been exercised deliberately; both are stated here because they bound what the measured results above actually mean.
 
-### Limit 1 — Gitea is a single point of failure with no backup
+### Limit 1 — Gitea is a single point of failure; backups now exist and are proven, but cover only half of it
 
-Confirmed by inspection:
+> **Superseded 2026-10-11.** This limit originally read *"with no backup"*. Backups were implemented on 4 Oct (`d1e49c4`) and a restore was exercised on 11 Oct — see **[E6](evaluation/E6-backup-restore.md)**. The single point of failure remains; what has changed is the consequence.
+
+**The structural problem is unchanged.** Gitea runs on one node (currently server-3) backed by `local-path` storage, which is node-local by definition:
 
 ```
 gitea-shared-storage   10Gi   local-path   ->  PV pinned to server-3
 ```
 
-**Every git repository and every container image in the cluster lives on one SD card in server-3.** `local-path` storage is node-local by definition — no replication, no redundancy — and no backup mechanism exists for this volume.
+Every git repository and every container image in the cluster lives on that one SD card. There is no replication and no RWX storage class available to provide any.
 
-**What is protected:** k3s takes automatic etcd snapshots every 12 hours (confirmed: four recent snapshots on disk). Cluster *state* is therefore recoverable.
+**What now protects it.** A systemd timer on every control-plane node runs `gitea dump` nightly, streaming over stdout so it never mounts Gitea's volume. Each node checks at runtime whether it is the one hosting Gitea and opts out if so — so the backups always land somewhere that survives the failure. In practice server-1 and server-2 each hold the latest three dumps; server-3 correctly holds none.
 
-**What is not:** Gitea's volume. If server-3's storage fails:
+**What the restore proves** (E6): the archive is intact, all three repositories pass `git fsck` with zero errors and clone with full history, and the 113-table database loads cleanly with its users, repositories and tokens. **Total recovery time for git and database state: ~30 seconds.**
 
-| Lost | Recoverable from |
-|---|---|
-| `cluster-config` repo | ✅ the Ansible repo on GitHub — Gitea is only a mirror of `manifests/` |
-| `apps` org repos (food-spotter, minecraft, testapp) | ❌ **nowhere else** |
-| All 12 container images | ⚠️ re-downloadable, but only with internet access + a full `preflight.yml` re-run |
+**What is still lost.** `gitea dump` runs `--skip-package-data`, so the registry is not in the backup:
 
-**Blast radius:** ArgoCD cannot sync (no repo to read), and no node can pull any image (no registry). The cluster keeps running whatever is already scheduled, but nothing can be deployed, updated or recovered. Restoration requires internet access, re-running `preflight.yml` to re-fetch every image and chart, and re-bootstrapping — hours, not minutes.
+| Asset | Recoverable? | How |
+|---|---|---|
+| All git repositories | ✅ | from the nightly dump, ~30 s |
+| Users, tokens, DB state | ✅ | from the same dump |
+| Platform images (argocd, dex, redis, 9× monitoring) | ✅ | `/var/lib/rancher/k3s/push-images`, verified present on all 3 servers (12 tarballs, 2.6 GB each) |
+| **Application images** (`cluster-console`, `camera-ingest`, `whoami`, `nginx`) | ❌ | **not in the backup and not in push-images** — rebuildable from the restored source, but that needs a build toolchain and internet access for base images |
 
-**Why this is a design consequence, not an oversight:** the architecture deliberately treats the Ansible repo as the source of truth and Gitea as a mirror — which is sound for platform config. The gap is that **tenant app repos and hand-pushed images have no upstream**, so for those Gitea *is* the only copy.
+So the recovery story is now: *repositories and database in seconds, platform images from any surviving node, application images only by rebuilding — which breaks the air-gap.*
 
-**Mitigations (not implemented):** periodic backup of the Gitea PVC to another node or off-cluster; or mirroring tenant repos to an external git host; or accepting the risk explicitly and documenting rebuild-from-scratch as the recovery path.
+**Also unresolved:** the dumps are stored unencrypted at mode `0644` and contain Gitea's `SECRET_KEY`, `INTERNAL_TOKEN`, `JWT_SECRET`, `LFS_JWT_SECRET`, a password hash and an API token hash. Physical possession of either node's SD card yields the cluster's full credential set.
+
+**Not yet proven:** a *running* Gitea serving from restored data. E6 proves the bytes are complete and usable; it does not prove a fresh deployment pointed at them comes up clean.
 
 ### Limit 2 — Losing two control-plane nodes is a different failure, not a worse one
 
