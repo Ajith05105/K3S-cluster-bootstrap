@@ -19,7 +19,7 @@ Every section below follows the same structure: **what we did → what we measur
 | 2. etcd write latency | **p99 = 16–32ms** (exceeds etcd's 10ms guidance), but mean is a healthy **2.49ms** |
 | 3. Control-plane disk saturation | Node leaves cluster in **~2 min**, recovers in **~9 min**, **API never degraded** |
 | 4. VIP failover | Leadership moved between nodes with **0 of 178 probes failing** |
-| 5. Full power loss | Cluster recovers **unattended** — via systemd + on-disk etcd, not the provisioning pipeline |
+| 5. Full power loss | Cluster recovers **unattended** — via systemd + on-disk etcd, not the provisioning pipeline (timed at **138s** in [E7](evaluation/E7-full-cluster-power-loss.md)) |
 | 6. Hard node failure (SIGKILL) | VIP outage of **5.77s**, then automatic failover to another node |
 | 7. Repeatability (n=3) | Single-run figures confirmed representative — **±1-11% spread**, read ratio reproduces at **95x** |
 | 8. Capacity recovery under load | Saturated cluster cleared its backlog **11s after a new node went `Ready`** (scheduler, not provisioning) |
@@ -324,6 +324,8 @@ So a hard failure should be expected to take **up to ~15 seconds**, not the sub-
 ---
 
 ## Test 5 — Full-cluster power loss (observed, not instrumented)
+
+> **Now instrumented.** This test recorded a real outage but took no timings. A controlled, simultaneous unclean reset of all three control-plane nodes was run on 2026-10-11 and measured **138 s to full recovery** — see **[E7](evaluation/E7-full-cluster-power-loss.md)**. The mechanism inferred below (systemd + on-disk etcd, not the provisioning pipeline) is confirmed there.
 
 ### What we did, and how
 
