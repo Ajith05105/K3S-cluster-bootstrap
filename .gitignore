@@ -77,3 +77,6 @@ Thumbs.db
 *.log
 logs/
 manifests/argocd/argo-cd/
+
+# Vendored copy of the cluster-console app source, kept locally for reference
+docs/*.zip

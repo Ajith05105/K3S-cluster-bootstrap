@@ -1,0 +1,822 @@
+# Cluster performance & resilience testing
+
+**Date:** 2026-09-25
+**Cluster:** 3× Raspberry Pi 5 control-plane (Ubuntu 24.04), 1× Pi 5 agent, 2× Mac mini agents (Fedora Asahi Remix, one solar-powered)
+**Tooling:** Kubestr v0.4.49 (fio), etcd's own metrics endpoint, purpose-built probe scripts; Tests 8–9 use the `console.cluster.local` workload console
+**Contributors:** Tests 1–7 and findings A–B by Ziyang (Nicky) Tian; Tests 8–9 by Ajith Penmatsa
+
+Every section below follows the same structure: **what we did → what we measured → what it proves.**
+
+---
+
+## Summary
+
+| Test | Headline result |
+|---|---|
+| 1. Storage benchmark | Storage performance varies **~90×** between nodes on the same StorageClass |
+| 2. etcd write latency | **p99 = 16–32ms** (exceeds etcd's 10ms guidance), but mean is a healthy **2.49ms** |
+| 3. Control-plane disk saturation | Node leaves cluster in **~2 min**, recovers in **~9 min**, **API never degraded** |
+| 4. VIP failover | Leadership moved between nodes with **0 of 178 probes failing** |
+| 5. Full power loss | Cluster recovers **unattended** — via systemd + on-disk etcd, not the provisioning pipeline |
+| 6. Hard node failure (SIGKILL) | VIP outage of **5.77s**, then automatic failover to another node |
+| 7. Repeatability (n=3) | Single-run figures confirmed representative — **±1-11% spread**, read ratio reproduces at **95x** |
+| 8. Self-provisioning under load | Saturated cluster cleared its backlog **11s after a new node went `Ready`** — *application-level* |
+| 9. Self-healing under load (power cut) | Losing 1 of 2 loaded nodes cost **~half the traffic**, recovered unattended — **duration not yet recorded** |
+| A. Incidental: airgap images | Images are **not uniformly distributed** — a pod can become unschedulable by landing on the wrong node |
+| B. Incidental: VIP config drift | Running VIP (`.60`) **does not match** declared config (`.50`) |
+| L1. Known limit | **Gitea is a single point of failure** — all repos + images on one SD card, no backup |
+| L2. Known limit | Losing **2 control-plane nodes freezes the cluster** (quorum loss) — qualitatively different from losing 1 |
+
+---
+
+## Test 1 — Storage performance across node types
+
+### What we did, and how
+
+Kubestr is a single CLI binary that spins up short-lived pods to run real fio jobs against a StorageClass, then tears them down. Getting it into an air-gapped cluster took four steps before any measuring happened.
+
+**1. Fetched the binary — arm64, not amd64.** It runs on a Pi, so the architecture matters:
+```bash
+curl -sL -o kubestr.tar.gz \
+  https://github.com/kastenhq/kubestr/releases/download/v0.4.49/kubestr_0.4.49_Linux_arm64.tar.gz
+file kubestr    # verified: ELF 64-bit ARM aarch64
+```
+
+**2. Found and mirrored the image it needs.** Kubestr runs its fio jobs inside a container; we extracted the default image reference from the binary, then pulled it for arm64 explicitly:
+```bash
+strings kubestr | grep ghcr.io       # -> ghcr.io/kastenhq/kubestr:latest
+skopeo copy --override-os linux --override-arch arm64 \
+  docker://ghcr.io/kastenhq/kubestr:latest \
+  docker-archive:kubestr-image.tar:ghcr.io/kastenhq/kubestr:latest
+```
+
+**3. Shipped both to a cluster node and pushed the image into Gitea.** The laptop cannot reach the API server (no route to the LAN), so kubestr has to run *on* a node. The image push reuses the existing crane-on-node pattern:
+```bash
+scp -P 2203 kubestr kubestr-image.tar pi@<tailscale-gateway>:/tmp/
+# then, on the node:
+crane auth login <gitea-clusterip>:3000 -u admin -p <password>
+crane push /tmp/kubestr-image.tar <gitea-clusterip>:3000/admin/kubestr:latest --insecure
+```
+
+**4. Gave the `default` namespace a pull secret.** Kubestr creates its pods there, and that namespace had no credentials for the Gitea registry. We used the scoped `read:package` token rather than the admin password:
+```bash
+kubectl create secret docker-registry gitea-registry-pull \
+  --docker-server=gitea.cluster.local:3000 \
+  --docker-username=admin --docker-password=<platform-pull-token> -n default
+kubectl patch serviceaccount default -n default \
+  -p '{"imagePullSecrets":[{"name":"gitea-registry-pull"}]}'
+```
+
+**Then ran the benchmark twice**, once per node type, pinning placement with a node selector so we were measuring a known machine rather than wherever the scheduler happened to put it:
+```bash
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml /tmp/kubestr fio \
+  -s local-path \
+  -i gitea.cluster.local:3000/admin/kubestr:latest \
+  -z 5Gi \
+  -N kubernetes.io/hostname=agent-7          # then again with mac-mini-agent
+```
+
+`-z 5Gi` was set deliberately — the default PVC size is **100Gi**, which exceeds free space on a Pi. Each run creates a PVC, executes four fio patterns (random read/write at 4K, bandwidth read/write at 128K), prints results, and cleans up after itself.
+
+### What we measured
+
+| Metric | agent-7 (Pi 5, SD card) | mac-mini-agent (Apple Silicon SSD) | Ratio |
+|---|---|---|---|
+| Random read 4K | 131 IOPS (541 KiB/s) | **11,931 IOPS** (47.7 MiB/s) | **91×** |
+| Random write 4K | 58 IOPS (247 KiB/s) | 319 IOPS (1.3 MiB/s) | 5.5× |
+| Read 128K | 15.7 MiB/s | **1.46 GiB/s** | **95×** |
+| Write 128K | 8.7 MiB/s | 56 MiB/s | 6.5× |
+| Wall-clock for same test | 2m 54s | 19.7s | 8.8× |
+| Disk utilisation | 97.5% (saturated) | — | |
+
+*These are single-run figures. **Test 7** repeats this benchmark 3× per node and confirms they are representative (±1–11% spread, read ratio reproducing at 95×).*
+
+### What this proves
+
+**Identical storage requests receive ~90× different performance depending purely on pod placement, and Kubernetes provides no way to express, discover, or schedule around that.** Both nodes advertise the same `local-path` StorageClass; nothing in the StorageClass, the PVC, or the scheduler distinguishes them. The difference is invisible until measured.
+
+Two consequences already observed in this cluster:
+- Prometheus runs without persistent storage — 58 write IOPS is not a viable backing store for it.
+- When the solar-powered node sleeps, its workload cannot reschedule at all, because `local-path` pins data to the node that provisioned it.
+
+**Secondary observation (not proven):** the read/write asymmetry — reads differ ~90×, writes only ~5× — is unexpected. 319 random write IOPS is poor for an SSD; a healthy NVMe delivers tens of thousands. Candidate explanations, in order of confidence: Asahi Linux's reverse-engineered NVMe driver handling `direct=1` writes poorly; interaction with the 16KB page-size kernel (`aarch64+16k`) these nodes run; or an fio configuration interaction. Requires further investigation before being claimed.
+
+---
+
+## Test 2 — etcd write latency
+
+### What we did, and how
+
+**1. Checked whether etcd metrics were reachable at all.** The intention was to enable k3s's `--etcd-expose-metrics` flag and let Prometheus scrape it — but first we checked what was already listening:
+```bash
+sudo ss -tlnp | grep -E ':2381|:2379'
+# LISTEN 127.0.0.1:2381   <- etcd metrics, already served, bound to localhost
+```
+It was already running. Prometheus can't reach it (wrong bind address), but anything *on the node* can — so no config change and no restart was needed to get the numbers.
+
+**2. Pulled the raw metrics and parsed the histogram.** etcd exposes fsync latency as a Prometheus histogram — cumulative counters per latency bucket. We fetched it and converted the buckets into a percentage distribution:
+```bash
+curl -s http://127.0.0.1:2381/metrics > /tmp/etcd-metrics.txt
+grep etcd_disk_wal_fsync_duration_seconds /tmp/etcd-metrics.txt
+```
+Each `_bucket{le="0.008"}` line gives the count of writes completing within that many seconds; dividing by `_count` (total writes) yields the cumulative percentages in the table below. `_sum / _count` gives the mean.
+
+**3. Cross-checked against etcd's own complaints.** etcd logs a warning whenever an operation exceeds 100ms, so we counted those over the preceding week as independent corroboration:
+```bash
+sudo journalctl -u k3s --since '7 days ago' \
+  | grep -c 'apply request took too long'
+```
+
+### What we measured
+
+Distribution across **7,327,798 recorded fsyncs**:
+
+| Latency | Cumulative % of writes |
+|---|---|
+| ≤ 1 ms | 26.29% |
+| ≤ 2 ms | 77.27% |
+| ≤ 4 ms | 87.48% |
+| **≤ 8 ms** | **98.25%** |
+| ≤ 16 ms | 98.85% |
+| ≤ 32 ms | 99.01% |
+| ≤ 64 ms | 99.97% |
+
+**Mean: 2.49 ms — p99: 16–32 ms bucket.**
+
+Corroborating log evidence — **1,133 slow-apply warnings in 7 days** (~6.7/hour):
+
+```json
+{"msg":"apply request took too long","took":"188.763451ms","expected-duration":"100ms",
+ "prefix":"read-only range ","request":"key:\"/registry/endpointslices\" limit:1 "}
+```
+
+### What this proves
+
+etcd's published guidance is a **p99 fsync under 10ms**. This cluster sits at **16–32ms at p99** — so it exceeds the recommendation — but the **mean is 2.49ms** and **98.25% of writes complete within 8ms**.
+
+> **The storage constraint on the control plane is a latency tail, not systemic slowness.**
+
+This also explains the 1,133 warnings: they are the ~1% tail surfacing across millions of operations over a week, not evidence of constant struggle.
+
+### Methodological note — a corrected inference
+
+An earlier draft derived **~17ms average write latency** from Test 1's fio result (58 random-write IOPS). **That inference was wrong by ~7×.** fio measured random 4K writes at queue depth 64 — a deliberately adversarial pattern — whereas etcd's WAL performs sequential appends, which flash handles far better.
+
+Recorded because the lesson generalises: **a synthetic random-write benchmark did not predict real sequential-append performance.** Measure the subsystem you actually care about.
+
+### What enabling the flag would still add
+
+The figures above are cumulative since process start — one snapshot, no time axis. Setting `--etcd-expose-metrics` binds port 2381 beyond localhost so Prometheus can scrape it continuously, yielding p99 over time in Grafana, correlation against cluster events (ArgoCD syncs, node reconnections), and per-node comparison across all three members. Not yet done.
+
+---
+
+## Test 3 — Control-plane disk saturation
+
+### What we did, and how
+
+**Question:** what happens to the cluster when one control-plane node's disk saturates?
+
+The key design decision was to instrument *before* applying load. Running the benchmark and looking afterwards would most likely have produced "it seemed fine" — the disruption had to be measured while it happened, against a known baseline.
+
+We wrote a single script that ran the whole sequence unattended:
+
+**1. Baseline capture** — how does the cluster behave normally?
+```bash
+# etcd complaint rate over the preceding 5 minutes
+sudo journalctl -u k3s --since '5 min ago' | grep -c 'apply request took too long'
+
+# 30 API latency samples, measured in milliseconds
+for i in $(seq 1 30); do
+  S=$(date +%s%N); kubectl get --raw /healthz >/dev/null; E=$(date +%s%N)
+  echo $(( (E-S)/1000000 ))
+done
+```
+
+**2. Started a background probe** sampling API latency once per second for the duration, so we would have a continuous record rather than before/after snapshots:
+```bash
+( for i in $(seq 1 200); do
+    S=$(date +%s%N); kubectl get --raw /healthz >/dev/null; E=$(date +%s%N)
+    echo $(( (E-S)/1000000 )); sleep 1
+  done > /tmp/api-during.txt ) &
+```
+
+**3. Applied the load** — the same fio benchmark from Test 1, but aimed at **server-3**, a control-plane node running etcd:
+```bash
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml /tmp/kubestr fio -s local-path \
+  -i gitea.cluster.local:3000/admin/kubestr:latest -z 5Gi \
+  -N kubernetes.io/hostname=server-3
+```
+
+**4. Compared during-load against baseline**, and checked specifically for leader elections — the failure mode we most expected:
+```bash
+sudo journalctl -u k3s --since "$MARK" | grep -c 'apply request took too long'
+sudo journalctl -u k3s --since "$MARK" | grep -ciE 'leader changed|lost leader|became leader'
+sudo journalctl -u k3s --since "$MARK" | grep -oE '"took":"[0-9.]+m?s"' | sort -rn | head -5
+```
+
+**5. Watched recovery** by polling node status every 10 seconds until it returned to `Ready`, then diagnosed the cause by reading logs on the affected node directly (via its own SSH port) rather than through the API:
+```bash
+ssh -p 2202 pi@<gateway> 'sudo journalctl -u k3s -n 8 --no-pager; cat /proc/loadavg; ps aux --sort=-%cpu | head'
+```
+That last step is what revealed the feedback loop and confirmed that recovery load was etcd catching up, not a leftover fio process.
+
+### What we measured
+
+| Elapsed | Event |
+|---|---|
+| T+0 | fio begins saturating server-3's disk |
+| T+35s | server-1 loses its tunnel to server-3 |
+| T+2m13s | server-3's etcd refuses peer connections on :2380, marked inactive |
+| ~T+2m | k3s restarts on server-3 |
+| ~T+9m | server-3 returns to `Ready`, unattended |
+
+| Metric | Baseline | During saturation |
+|---|---|---|
+| API latency (avg) | 165 ms | **164 ms** |
+| API latency (max) | 331 ms | 292 ms |
+| Samples | 30 | 114 |
+| Leader elections | — | **0** |
+| Cluster-wide slow-apply warnings | 3 / 5 min | 2 |
+| `/healthz` | ok | **ok throughout** |
+
+On server-3 itself, during saturation:
+```json
+{"msg":"apply request took too long","took":"1.658117412s","expected-duration":"100ms",
+ "request":"key:\"/registry/minions/server-3\" limit:1 "}
+```
+
+### What this proves
+
+**Three separate findings:**
+
+**1. The cluster degrades gracefully.** A control-plane node left the cluster entirely and **`kubectl` never noticed** — API latency was statistically unchanged (164ms vs 165ms), zero leader elections occurred, and quorum held at 2 of 3. This is the core HA claim, demonstrated rather than assumed.
+
+**2. The failure mode is a feedback loop.** The node could not report its own status *because reading its own node object took 1.66 seconds*. The disk was too slow to report that the disk was too slow. This is why it surfaced as `NodeStatusUnknown` rather than a clean `DiskPressure` condition — it could not get a message out at all.
+
+**3. Recovery is itself disk-bound.** No fio was running during the ~9-minute recovery; the sustained load average of 7.4 was etcd replaying to catch up with the leader, on the same slow disk that caused the failure. Recovery time is therefore a function of the same constraint that caused the outage.
+
+**Bonus result:** the benchmark never completed — zero fio results were captured for server-3, because the node dropped out first. *The measurement destroyed the thing it was measuring*, which is itself the answer to "can a control-plane node sustain heavy disk load?"
+
+---
+
+## Test 4 — kube-vip control-plane VIP failover
+
+### What we did, and how
+
+**1. Identified which node actually holds the VIP.** The nodes are physically indistinguishable, so this was done through the API rather than by looking at hardware. kube-vip elects a leader via a Kubernetes Lease:
+```bash
+kubectl get lease -n kube-system | grep plndr
+# plndr-cp-lock     server-2    <- control-plane VIP holder
+# plndr-svcs-lock   server-2    <- LoadBalancer services holder
+```
+
+**2. First attempt failed — and that failure found a bug.** The initial probe reported the VIP unreachable *at baseline*, before anything was killed. Rather than treating that as a broken script, we checked what address kube-vip was actually configured with:
+```bash
+kubectl get pod -n kube-system -l app.kubernetes.io/name=kube-vip-ds \
+  -o jsonpath='{.items[0].spec.containers[0].env}'
+# address = 192.168.1.60     <- but group_vars says 192.168.1.50
+```
+That discrepancy is Incidental Finding B below. We re-pointed the test at `.60`, the address actually in service.
+
+**3. Built the probe to distinguish "unreachable" from "rejected".** An unauthenticated request to the API returns **HTTP 401** — which means the VIP *is* working. Only a connection failure (curl code `000`) counts as down:
+```bash
+C=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 1 https://192.168.1.60:6443/healthz)
+[ "$C" = "000" ] && echo "DOWN" || echo "UP"
+```
+Sampled every 250ms with a millisecond timestamp, so any outage shorter than that interval would be invisible — a resolution limit we state explicitly rather than claiming zero.
+
+**4. Killed kube-vip on the leader**, targeting by node rather than pod name so the test doesn't depend on a generated identifier:
+```bash
+kubectl delete pod -n kube-system -l app.kubernetes.io/name=kube-vip-ds \
+  --field-selector spec.nodeName=server-2 --wait=false
+```
+
+**5. Compared lease holder before and after** to confirm leadership genuinely moved between machines, rather than the same node simply restarting and reclaiming it.
+
+### What we measured
+
+| | Result |
+|---|---|
+| Lease holder before | server-2 |
+| Lease holder after | **server-3** — leadership transferred |
+| Probe samples after kill | 178 |
+| **Samples where the VIP was unreachable** | **0** |
+| VIP status after | HTTP 401 (serving TLS correctly) |
+
+### What this proves
+
+**Control-plane VIP failover is effectively instantaneous for a process-level failure.** Leadership moved between physical nodes without a single failed probe at 250ms resolution — the API remained continuously reachable through the transition.
+
+### Important caveat — this was not a node failure
+
+This tested a **pod** deletion, which is graceful: kube-vip loses its lease promptly. An **abrupt node loss** (power cut, cable pull) is different — the new leader cannot claim the lease until the existing one expires:
+
+```
+vip_leaseduration = 15s
+vip_renewdeadline = 10s
+vip_retryperiod   = 2s
+```
+
+So a hard failure should be expected to take **up to ~15 seconds**, not the sub-250ms measured here. **That test has not been run**, and it is the one that matches the real power outage in Test 5.
+
+---
+
+## Test 5 — Full-cluster power loss (observed, not instrumented)
+
+### What we did, and how
+
+Nothing deliberate — a real mains power failure at the hosting site took every node down simultaneously. Recorded here because the recovery behaviour is a genuine result, and because the obvious explanation for it turned out to be wrong.
+
+**How the mechanism was established:** by reading the provisioning code rather than assuming. The initial belief was that lease-watcher and ansible-runner rebuilt the cluster. Checking `custom_images/ansible-runner/ansible-runner.py` shows that cannot be what happened — `process_workers()` calls `node_is_ready()` first, and skips any node the cluster already reports as `Ready`:
+
+```python
+if node_is_ready(api, hostname):
+    # already joined - nothing to provision
+    continue
+```
+
+An already-provisioned node that reboots is `Ready` again as soon as k3s starts, so the runner never touches it. That narrows the actual recovery mechanism to systemd and on-disk etcd state.
+
+### What we observed
+
+The cluster returned to full service with **no human intervention**. No measurement was taken of total recovery time, per-node return order, or whether any workload needed manual attention.
+
+### What this proves — and what it does not
+
+**What recovered the cluster:**
+1. k3s is a **systemd service enabled at boot** — power returns, systemd starts it automatically.
+2. **etcd's state lives on local disk** — each control-plane node reads its existing database back.
+3. **Raft re-forms quorum** once two of three members are up.
+4. Workloads reschedule from the recovered cluster state.
+
+**What did *not* recover the cluster: the self-healing provisioning pipeline.** For nodes that are already provisioned, `ansible-runner` explicitly skips them — `node_is_ready()` returns true and it takes no action. lease-watcher and ansible-runner exist to build **new or wiped** nodes, machines with no k3s installed. Neither played any part here.
+
+The distinction matters because *"how did lease-watcher help a node that was already provisioned?"* is the obvious follow-up question. The correct claim is about **state durability and service-level auto-start**, not automated provisioning. It is still a real resilience result — just a different one than it first appears.
+
+**Status:** observed but not instrumented. Repeating it deliberately with timing would convert a good anecdote into a measured claim.
+
+---
+
+## Test 6 — Hard node failure (SIGKILL)
+
+Companion to Test 4. That test measured a *graceful* failure; this measures an abrupt one, which is what a power cut actually looks like.
+
+### What we did, and how
+
+**1. Established that this is recoverable before running it.** SIGKILL terminates a running process; it does not touch anything on disk — binary, config, etcd database and certificates all survive. Recovery depends entirely on systemd's restart policy, so we checked it first:
+```bash
+sudo systemctl show k3s -p Restart      # Restart=always
+sudo systemctl is-enabled k3s           # enabled  (also survives real power loss)
+```
+
+**2. Identified the current VIP holder** — leadership had moved to server-3 during Test 4:
+```bash
+kubectl get lease plndr-cp-lock -n kube-system -o jsonpath='{.spec.holderIdentity}'
+```
+
+**3. Started a 250ms probe against the VIP** from server-1 (a node not under test, so the measurement survives the failure).
+
+**4. Killed k3s abruptly on the VIP holder:**
+```bash
+sudo systemctl kill -s SIGKILL k3s
+```
+`SIGKILL` is the one signal a process cannot catch, block, or clean up from. It dies instantly, without releasing its kube-vip lease — which is precisely what the surviving nodes would observe during a power cut.
+
+Note: systemd reported `Failed to send signal SIGKILL to auxiliary processes: Invalid argument`. This is a partial error — the **main process was killed successfully** (confirmed in the journal below); only the signalling of container processes in the cgroup failed. The test was valid.
+
+### What we measured
+
+Journal confirmation on the target node:
+```
+15:23:53  k3s.service: Main process exited, code=killed, status=9/KILL
+15:23:58  k3s.service: Scheduled restart job, restart counter is at 2
+15:24:15  k3s active again
+```
+
+| Metric | Result |
+|---|---|
+| Kill issued | 15:23:53 |
+| VIP first unreachable | 15:23:53.593 — **detected in ~0.6s** |
+| VIP answering again | 15:23:59.360 |
+| **VIP outage** | **5.77 seconds** |
+| Failed probes | 21, **contiguous** — one clean outage, no flapping |
+| VIP holder before → after | server-3 → **server-1** |
+| Node recovery | returned to `Ready` unattended |
+
+### What this proves
+
+**A hard control-plane failure costs ~5.8 seconds of control-plane VIP availability**, after which the API is reachable again via a different node, with no human intervention.
+
+This also **tests a prediction and refines it.** Test 4 predicted "up to ~15s" from `vip_leaseduration = 15`. The measured 5.77s is inside that bound but meaningfully better, because the other two lease parameters govern the real path: `vip_renewdeadline = 10` means the leader must renew within 10s, and `vip_retryperiod = 2` means candidates retry every 2s — so a follower can claim the lease well before the full 15s duration elapses.
+
+Taken with Test 4, the failover envelope is now characterised at both ends:
+
+| Failure type | VIP outage |
+|---|---|
+| Graceful (pod deleted, lease released) | **0 ms** — below 250ms resolution |
+| Abrupt (SIGKILL, lease abandoned) | **5.77 s** |
+
+### Methodological note — clock skew nearly produced a false result
+
+The orchestrating machine's clock was **47 seconds ahead** of the cluster nodes. The first analysis filtered probe samples using the orchestrator's timestamp, which excluded the entire failure window and reported **"290 samples, all UP"** — i.e. zero downtime.
+
+The error surfaced only because the journal showed the kill at `15:23:53` while the orchestrator recorded issuing it at `15:24:40`. Re-analysing against node time revealed 21 DOWN samples that had been filtered out.
+
+**Lesson: when correlating measurements taken on one machine against events on another, verify clock alignment first.** An unnoticed 47-second skew turned a real 5.77-second outage into an apparent zero. Fitting, on a cluster whose worst historical outage was also a clock problem.
+
+---
+
+## Test 7 — Repeatability (addressing n=1)
+
+Every figure in Tests 1–6 came from a single run. This test establishes whether those numbers were representative or flukes.
+
+### What we did, and how
+
+Re-ran the identical Test 1 benchmark **three times per node**, extracting the four headline figures from each run and comparing spread:
+
+```bash
+for i in 1 2 3; do
+  sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml /tmp/kubestr fio -s local-path \
+    -i gitea.cluster.local:3000/admin/kubestr:latest -z 5Gi \
+    -N kubernetes.io/hostname=<node>
+done
+```
+
+Runs were performed on **agent nodes only**. Test 3 established that a sustained fio run removes a control-plane node from the cluster, so repeating it there would have cost three outages for a variance figure.
+
+### What we measured
+
+**Random 4K IOPS, 3 runs per node:**
+
+| Measurement | Mean | Range | Spread |
+|---|---|---|---|
+| mac-mini-agent read | **11,391 IOPS** | 11,203 – 11,659 | ±2% |
+| mac-mini-agent write | **353 IOPS** | 338 – 369 | ±4% |
+| agent-7 read | **120 IOPS** | 119 – 122 | ±1% |
+| agent-7 write | **58 IOPS** | 54 – 63 | ±8% |
+
+Ratios across repeats: **read 95×, write 6.1×**.
+
+**Sequential bandwidth (128K), 3 runs per node:**
+
+| Measurement | Mean | Range | Spread |
+|---|---|---|---|
+| mac-mini-agent read | **1.34 GiB/s** | 1.18 – 1.46 GiB/s | ±11% |
+| mac-mini-agent write | **57.1 MiB/s** | 52.0 – 63.5 MiB/s | ±10% |
+| agent-7 read | **15.6 MiB/s** | 14.6 – 16.2 MiB/s | ±5% |
+| agent-7 write | **8.2 MiB/s** | 7.6 – 9.3 MiB/s | ±10% |
+
+Read bandwidth ratio across repeats: **88×**.
+
+### What this proves
+
+**The single-sample figures in Test 1 were representative.** Across three runs per node, every measurement falls within **±1–11%** of its mean. Random-read IOPS is the most stable of all (±1–2%), which matters because it carries the headline finding.
+
+The cross-node ratio reproduces almost exactly: **95× for random-read IOPS across repeats, versus 95× from the original single run.** Sequential read bandwidth gives 88× over repeats. The original numbers were not a lucky sample.
+
+This matters for how the earlier numbers can be cited: *"~90× variance"* is now supported by nine measurements across two machines rather than two, and can be stated with a spread rather than as a bare point value.
+
+**Note on precision:** quote this as an order-of-magnitude finding rather than a precise constant. Depending on which metric you use, the ratio lands between **88× and 95×**, and write ratios (~5.5–6.1×) are far more variable than read ratios. The robust claim is *"storage read performance differs by roughly two orders of magnitude between node types, while write performance differs by under an order of magnitude"* — which holds across every run.
+
+---
+
+## Test 8 — Self-provisioning under load: capacity recovery when a node joins
+
+> **Run by:** Ajith Penmatsa, using the `console.cluster.local` workload console.
+> **Source:** project poster, figure *"Test 1: Provisioning Under Load"*.
+> **Status:** results reproduced from the poster figure. Raw data not yet archived in this repo — see *Open items* below before citing exact values.
+
+Companion to Test 9. This is the first **application-level** measurement in this document; Tests 1–7 all measure infrastructure behaviour (disk, etcd, VIP, API). Here the quantity observed is work the cluster actually delivers.
+
+### What we did, and how
+
+**1.** A single Raspberry Pi 5 ran a frame-processing workload, driven through `console.cluster.local`.
+
+**2.** Load was ramped until the node saturated and began **dropping frames** — i.e. the offered rate exceeded what one node could process, so the deficit became visible as a sustained non-zero drop rate rather than as latency.
+
+**3.** With the workload still saturated, a **second Pi was joined to the cluster mid-test**.
+
+**4.** Kubernetes rescheduled the workload across both nodes. No manual action was taken at any point after the join.
+
+Saturating first and then adding capacity is the right shape for this question: it makes the scheduler's response visible as a step change in a metric that was already pinned at its ceiling, rather than requiring a before/after comparison across separate runs.
+
+### What we measured
+
+| Metric | Result |
+|---|---|
+| Nodes at start | 1 (saturated) |
+| Observable symptom of saturation | sustained non-zero dropped-frame rate |
+| Intervention | second Pi 5 joined mid-test |
+| Rescheduling | automatic — no manual intervention |
+| **Time from new node `Ready` → dropped frames back to zero** | **11 s** |
+| Throughput after rebalance | rises to roughly double the single-node ceiling *(read from the figure; confirm against raw data)* |
+
+### What this proves
+
+**A saturated cluster absorbs new capacity and returns to full service automatically, and the scheduler does so promptly** — 11 seconds from the new node reporting `Ready` to the drop rate reaching zero. That interval covers pod scheduling, image availability on the new node, container start, and the workload rebalancing across two nodes.
+
+It also demonstrates the behaviour at the layer that matters to a user: not "a node joined" but "the backlog cleared."
+
+### What this does **not** prove — important
+
+**The 11 seconds is measured from node `Ready`, not from plug-in.** It excludes detection, address assignment, k3s installation and registration — the entire self-provisioning pipeline that precedes `Ready`.
+
+So this result **does not** satisfy the *"self-healing agent rejoin time (lease-watcher → ansible-runner full cycle)"* item still listed under **Not yet measured**, which remains estimated at 3–8 minutes and unmeasured. The two intervals are adjacent but disjoint:
+
+```
+[ plug in ]---- provisioning pipeline ----[ Ready ]---- 11 s ----[ drop rate = 0 ]
+             ^ still unmeasured (est. 3-8 min)        ^ measured here
+```
+
+The poster's wording — *"a new node cleared an overload within 11 s"* — is accurate. *"A new node joined within 11 s"* would not be, and the distinction must survive into the report.
+
+### Open items before citing exact values
+
+- What `console.cluster.local` is: the workload image, what constitutes a "frame", and how processed/dropped counts are derived.
+- The load generator and its ramp profile.
+- Whether the joining node was auto-provisioned via the lease-watcher → ansible-runner path, or pre-built and simply started. **This determines whether the test exercises the project's novel mechanism or only Kubernetes' scheduler.**
+- Clock alignment between the measuring host and the nodes — see the methodological note under Test 6; a 47 s skew previously inverted a result in this very document.
+- Archive the raw series alongside this document.
+
+---
+
+## Test 9 — Self-healing under load: power cut to a node serving traffic
+
+> **Run by:** Ajith Penmatsa, using the `console.cluster.local` workload console.
+> **Source:** project poster, figure *"Test 2: Self-Healing Under Load"*.
+> **Status:** qualitative result reproduced from the poster. **The outage duration was not recorded on the poster** — see *Open items*.
+
+Completes the failure-severity progression. Test 6 killed the k3s *process* with SIGKILL, leaving the machine, its disk and its data intact. Test 5 observed loss of the *whole cluster*. This test kills **one node**, by cutting its power, while it is actively serving traffic.
+
+| Test | What died | Measured at |
+|---|---|---|
+| 4 | kube-vip pod (graceful) | control-plane VIP |
+| 6 | k3s process (SIGKILL) | control-plane VIP |
+| **9** | **the node (power cut)** | **application traffic** |
+| 5 | the entire cluster (power cut) | observed only |
+
+### What we did, and how
+
+**1.** Two Raspberry Pi 5s ran the frame-processing workload under **steady** load — deliberately below saturation, unlike Test 8, so that the surviving node had headroom to absorb the failed node's share.
+
+**2.** Power was **physically cut** to one of the two nodes mid-test. This is a genuine power loss, not a signal: no graceful shutdown, no lease release, no filesystem sync, no systemd clock persist.
+
+**3.** No manual intervention was performed. Recovery was left entirely to Kubernetes.
+
+### What we measured
+
+| Metric | Result |
+|---|---|
+| Nodes under load | 2, steady state |
+| Failure mode | physical power cut to one node |
+| Traffic lost at peak | **roughly half** |
+| Recovery mechanism | Kubernetes detected the dead node and rerouted to the survivor |
+| Manual intervention | **none** |
+| **Outage duration** | **not recorded — see Open items** |
+
+### What this proves
+
+**Losing one of two loaded nodes degrades service proportionally rather than totally, and the cluster restores full throughput without human action.** Roughly half the traffic failing is the expected signature of losing one of two equally loaded replicas — the loss is bounded by the failed node's share, which confirms traffic was genuinely distributed rather than concentrated.
+
+This is the application-level counterpart to Test 6's control-plane result, and it is the first test here to use a **real power cut** on an instrumented node rather than a signal or an unplanned outage.
+
+### What this does **not** yet prove
+
+**Without the outage duration, the recovery claim is qualitative.** And Test 6's 5.77 s cannot be borrowed for it — the two measure different paths governed by different timers:
+
+| | Test 6 (VIP) | Test 9 (application traffic) |
+|---|---|---|
+| Recovery gated by | kube-vip lease (`leaseduration 15`, `renewdeadline 10`, `retryperiod 2`) | node-monitor-grace-period (~40 s default), pod eviction, endpoint removal |
+| Measured | **5.77 s** | unrecorded |
+
+Application recovery should be expected to take **substantially longer** than 5.77 s on default Kubernetes timers. Read the real figure off the raw series; do not infer it.
+
+### Open items before citing
+
+- **The outage duration**, from the raw series — the single most valuable number missing from this document.
+- Whether "roughly half" is measured or estimated from the figure.
+- Whether the workload was a Deployment with replicas or a DaemonSet — this determines whether recovery required rescheduling or only endpoint removal, which changes the expected timer entirely.
+- Whether the node was restored afterwards, and how long it took to rejoin.
+
+---
+
+## Incidental finding A — Airgap images are not uniformly distributed
+
+### How we found it
+
+Not a planned test. While verifying cluster health after Test 3, a routine sweep for unhealthy pods surfaced it:
+```bash
+kubectl get pods -A --no-headers | grep -vE 'Running|Completed'
+# kube-system  traefik-59b7647586-m852x  0/1  ImagePullBackOff  9m32s
+```
+Traefik had rescheduled onto `agent-7` during the disruption and could not start — meaning cluster ingress was down. We diagnosed it with `describe`, then checked which nodes actually held the image locally:
+```bash
+kubectl describe pod traefik-... -n kube-system | grep -E 'Image:|Node:|Failed'
+sudo k3s ctr --namespace k8s.io images list -q | grep traefik
+```
+Service was restored by cordoning the node lacking the image, deleting the pod so it rescheduled elsewhere, then uncordoning:
+```bash
+kubectl cordon agent-7
+kubectl delete pod -n kube-system -l app.kubernetes.io/name=traefik
+kubectl uncordon agent-7          # once traefik was Running on another node
+```
+
+### What we measured
+
+```
+Image:  rancher/mirrored-library-traefik:3.7.8
+Failed: lookup registry-1.docker.io: Try again
+```
+
+server-1 holds that image in containerd; agent-7 does not. Nodes also run different k3s versions — servers `v1.36.4+k3s1`, agent-7 `v1.36.0+k3s1` — so their airgap bundles contain different traefik versions (3.7.8 vs 3.6.13).
+
+### What this proves
+
+**A pod can become permanently unschedulable purely by landing on a node provisioned at a different time.** k3s-bundled components live at `docker.io/...`, which the Gitea registry mirror does not cover, so a node that lacks the image locally has no way to obtain it in an air-gapped environment.
+
+This is a latent availability risk across the whole cluster, not a one-off incident — it cost ~10 minutes of ingress downtime when it triggered.
+
+### Remediation options (not yet implemented)
+
+- Push k3s-bundled images into the Gitea registry and mirror `docker.io`, so any node can fetch them, **or**
+- Ensure all nodes are provisioned from the same k3s version / airgap bundle, **or**
+- Pin traefik to nodes known to hold the image (weakest — reduces availability)
+
+---
+
+## Incidental finding B — VIP config drift
+
+### How we found it
+
+Discovered while setting up Test 4. The first failover run reported every single probe as failed — including the baseline samples taken *before* anything was killed. Rather than assuming a broken probe, we checked all three places the VIP address is defined and tested each one:
+```bash
+# what the config declares
+grep kube_vip_vip inventories/production/group_vars/all.yml
+
+# what the generated manifest on disk says
+grep -A2 'name: address' roles/deploy_kube_vip/files/kube-vip-daemonset.yaml
+
+# what is actually running in the cluster
+kubectl get pod -n kube-system -l app.kubernetes.io/name=kube-vip-ds \
+  -o jsonpath='{.items[0].spec.containers[0].env}'
+
+# and which address actually answers
+curl -sk -o /dev/null -w '%{http_code}' --max-time 3 https://192.168.1.50:6443/healthz   # 000
+curl -sk -o /dev/null -w '%{http_code}' --max-time 3 https://192.168.1.60:6443/healthz   # 401
+```
+
+### What we measured
+
+| Source | Address | Reachable? |
+|---|---|---|
+| `inventories/production/group_vars/all.yml` | `192.168.1.50` | ❌ no response |
+| `roles/deploy_kube_vip/files/kube-vip-daemonset.yaml` (generated) | `192.168.1.50` | — |
+| **Running DaemonSet in the cluster** | **`192.168.1.60`** | ✅ HTTP 401 |
+
+LoadBalancer allocation is unaffected and works correctly, assigning from the configured `.61–.70` range:
+```
+kube-system/traefik        192.168.1.61
+minecraft/minecraft-app    192.168.1.62
+```
+
+### What this proves
+
+The running kube-vip was deployed from an older generated manifest and never re-applied after the address changed in config. **The next `deploy_kube_vip` run will silently move the control-plane VIP from `.60` to `.50`**, breaking anything pointing at the current address.
+
+Root cause is the same pattern as the stale Gitea chart encountered earlier: `preflight.yml` gates manifest generation on *file existence* (`when: not vendored_daemonset.stat.exists`), so it never notices that its inputs changed. **Two separate bugs, one root cause** — existence-gated generation steps that don't detect config drift.
+
+---
+
+## Known limits — not tested, but characterised
+
+Two structural limits identified during testing. Neither has been exercised deliberately; both are stated here because they bound what the measured results above actually mean.
+
+### Limit 1 — Gitea is a single point of failure with no backup
+
+Confirmed by inspection:
+
+```
+gitea-shared-storage   10Gi   local-path   ->  PV pinned to server-3
+```
+
+**Every git repository and every container image in the cluster lives on one SD card in server-3.** `local-path` storage is node-local by definition — no replication, no redundancy — and no backup mechanism exists for this volume.
+
+**What is protected:** k3s takes automatic etcd snapshots every 12 hours (confirmed: four recent snapshots on disk). Cluster *state* is therefore recoverable.
+
+**What is not:** Gitea's volume. If server-3's storage fails:
+
+| Lost | Recoverable from |
+|---|---|
+| `cluster-config` repo | ✅ the Ansible repo on GitHub — Gitea is only a mirror of `manifests/` |
+| `apps` org repos (food-spotter, minecraft, testapp) | ❌ **nowhere else** |
+| All 12 container images | ⚠️ re-downloadable, but only with internet access + a full `preflight.yml` re-run |
+
+**Blast radius:** ArgoCD cannot sync (no repo to read), and no node can pull any image (no registry). The cluster keeps running whatever is already scheduled, but nothing can be deployed, updated or recovered. Restoration requires internet access, re-running `preflight.yml` to re-fetch every image and chart, and re-bootstrapping — hours, not minutes.
+
+**Why this is a design consequence, not an oversight:** the architecture deliberately treats the Ansible repo as the source of truth and Gitea as a mirror — which is sound for platform config. The gap is that **tenant app repos and hand-pushed images have no upstream**, so for those Gitea *is* the only copy.
+
+**Mitigations (not implemented):** periodic backup of the Gitea PVC to another node or off-cluster; or mirroring tenant repos to an external git host; or accepting the risk explicitly and documenting rebuild-from-scratch as the recovery path.
+
+### Limit 2 — Losing two control-plane nodes is a different failure, not a worse one
+
+With three etcd members, **quorum is two**. Tests 3 and 6 both removed exactly one node and the cluster stayed fully functional — that result does **not** extrapolate.
+
+| Nodes lost | Members remaining | Quorum | Cluster behaviour |
+|---|---|---|---|
+| 1 | 2 | held | Fully functional — **measured twice** (Tests 3, 6) |
+| 2 | 1 | **lost** | etcd becomes **read-only**; the API cannot commit writes |
+
+Quorum loss does not degrade the cluster — it **freezes** it. No scheduling, no deployments, no ArgoCD syncs, no pod restarts, no configuration changes. Already-running pods continue (kubelet does not need the API server to keep containers alive), but nothing can change.
+
+Recovery also differs in kind: if a node returns, quorum restores automatically. If two are lost **permanently**, recovery requires forcing a new single-member cluster from an etcd snapshot — a manual, involved operation.
+
+**Not tested.** Doing so means a deliberate full-cluster freeze, which is a materially larger commitment than the single-node failures measured above.
+
+---
+
+## Defensible claims
+
+Directly measured:
+
+- Storage performance varies **~90× for reads, ~5.5× for writes** between node types on the same StorageClass.
+- etcd's WAL fsync **p99 falls in the 16–32ms bucket**, exceeding etcd's recommended sub-10ms p99, while the **mean is 2.49ms** and **98.25% of writes complete under 8ms** — a latency tail, not systemic slowness. Measured across 7,327,798 fsyncs.
+- Corroborated by **1,133 slow-apply warnings in 7 days**, consistent with that ~1% tail.
+- Under sustained disk saturation of one control-plane node, the node **leaves the cluster within ~2 minutes** and **self-recovers in ~9 minutes**, unattended.
+- Throughout that failure, **API latency was unchanged (164ms vs 165ms)**, **zero leader elections** occurred, and **quorum was maintained** — degrading from 3 control-plane members to 2 and back.
+- **CPU is not the constraint**: 2–8% utilisation across all nodes while disks saturated at 97.5%.
+- **VIP failover for a process-level failure is effectively instantaneous**: leadership moved server-2 → server-3 with **0 of 178 probes** (250ms intervals) failing.
+- **A hard control-plane failure (SIGKILL) costs 5.77s of VIP availability**, measured across 21 contiguous failed probes at 250ms intervals, after which the API is served by another node automatically.
+- The failover envelope is characterised at both ends: **0ms for a graceful failure, 5.77s for an abrupt one**.
+- LoadBalancer IP allocation works correctly across the configured range.
+- **A saturated cluster absorbs new capacity automatically**: with one node saturated and dropping frames, joining a second node returned the dropped-frame rate to **zero within 11s of that node reaching `Ready`**, with no manual intervention. *Application-level; measured by Ajith via `console.cluster.local`. Interval starts at `Ready`, so it excludes the provisioning pipeline.*
+- **Losing one of two loaded nodes degrades service proportionally, not totally**: a physical power cut to one of two equally loaded nodes cost **roughly half the traffic**, after which Kubernetes rerouted to the survivor unattended. *Outage duration not yet recorded — the claim is currently qualitative.*
+- **Losing one control-plane node is survivable; losing two is not.** Quorum is 2 of 3 — at one remaining member etcd goes read-only and the cluster freezes. *Characterised from etcd's consensus model, not tested.*
+- **The cluster survives total power loss and recovers unattended** — via systemd auto-start plus on-disk etcd state, not the provisioning pipeline. *Observed in a real outage; not instrumented.*
+
+Stated with caveats:
+
+- Mac mini write performance (319 IOPS) suggests Asahi NVMe driver immaturity — *plausible, not proven; could also be page size or fio configuration.*
+
+---
+
+## Not yet measured
+
+- Self-healing agent rejoin time (lease-watcher → ansible-runner full cycle) — the most novel mechanism in this project, still unquantified.
+  **Estimated 3–8 minutes** from component costs: ~237MB of artifacts (69MB k3s binary + 168MB airgap bundle) transferred and imported at agent-7's measured 8.2 MiB/s write speed, plus containerd image import, k3s startup and registration — and up to 300s of detection latency if ansible-runner's watch misses and it falls back to its resync interval. **This is an estimate derived from measured components, not a measurement.**
+  **Test 8 does not answer this** — its 11s is measured from node `Ready` onward and excludes the entire provisioning pipeline.
+- Pod rescheduling time following node loss — **partially covered by Test 9**, which shows recovery happens unattended but does not record how long it took. Extracting that duration from Test 9's raw series is the cheapest remaining measurement in this document.
+- Control-plane pod/scale ceiling (would need KWOK or a pod-count ramp)
+- ~~Application-level throughput under load~~ — **now covered by Tests 8–9** (frame-processing workload via `console.cluster.local`), though both still need their raw series archived, and Test 9 still needs its outage duration.
+- Behaviour of the solar-powered node across its power cycle
+- Whether server-1/2 storage matches agent-7 (only one agent was fully benchmarked)
+
+**Methodological status:** Test 1's storage figures are **n=3 with variance reported** (see Test 7). Tests 3, 4 and 6 remain **n=1** — each deliberately degrades the cluster, so repeats cost real outages rather than just time. Their headline figures (~2 min to drop out, ~9 min recovery, 5.77 s VIP outage) should be read as single observations, not averages. **Tests 8 and 9 are likewise n=1**, and were run by a different operator on a different toolchain (`console.cluster.local`) from Tests 1–7 — so their figures should be reported as single observations from a separate measurement setup, not pooled with the rest.
+
+---
+
+## Reproduction
+
+Kubestr is a single CLI binary, not a deployed workload.
+
+```bash
+# 1. On an internet-connected machine — arm64, NOT amd64
+curl -sL -o kubestr.tar.gz \
+  https://github.com/kastenhq/kubestr/releases/download/v0.4.49/kubestr_0.4.49_Linux_arm64.tar.gz
+tar xzf kubestr.tar.gz
+
+# 2. Mirror its fio image (arm64 explicitly)
+skopeo copy --override-os linux --override-arch arm64 \
+  docker://ghcr.io/kastenhq/kubestr:latest \
+  docker-archive:kubestr-image.tar:ghcr.io/kastenhq/kubestr:latest
+
+# 3. Ship both to a cluster node — the laptop cannot reach the API server
+scp -P 2203 kubestr kubestr-image.tar pi@<tailscale-gateway>:/tmp/
+
+# 4. On the node — push the image into Gitea
+crane auth login <gitea-clusterip>:3000 -u admin -p <password>
+crane push /tmp/kubestr-image.tar <gitea-clusterip>:3000/admin/kubestr:latest --insecure
+
+# 5. Give the default namespace a pull secret (kubestr runs its pods there)
+kubectl create secret docker-registry gitea-registry-pull \
+  --docker-server=gitea.cluster.local:3000 \
+  --docker-username=admin --docker-password=<platform-pull-token> -n default
+kubectl patch serviceaccount default -n default \
+  -p '{"imagePullSecrets":[{"name":"gitea-registry-pull"}]}'
+
+# 6. Run, targeting a specific node
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml /tmp/kubestr fio \
+  -s local-path \
+  -i gitea.cluster.local:3000/admin/kubestr:latest \
+  -z 5Gi \
+  -N kubernetes.io/hostname=<node>
+
+# etcd latency distribution (no config change needed)
+curl -s http://127.0.0.1:2381/metrics | grep etcd_disk_wal_fsync_duration_seconds
+```
+
+**Gotchas encountered:**
+- Default PVC size is **100Gi** — exceeds free space on a Pi; set `-z` explicitly.
+- `sudo` drops `KUBECONFIG`; pass it inline.
+- The binary must be **arm64** — an amd64 build fails with `exec format error` on these nodes.
+- kubestr cleans up its own PVC and pod on completion.
+- Running fio against a **control-plane** node will take that node out of the cluster (see Test 3).
