@@ -55,7 +55,9 @@ It is also the best case, and only the best case. Each subsequent deletion took 
       ×7.9     ×3.3      ×4.0       ×1.9
 ```
 
-That is an exponential backoff converging on a ceiling a little under 300 s. It matches ArgoCD's documented self-heal backoff — base 5 s, factor 3, capped at 5 minutes — and the cluster is running stock defaults; `argocd-cmd-params-cm` sets no backoff keys and the application controller carries no backoff flags.
+That is an exponential backoff with a growth factor of roughly 3, converging on a ceiling just under **300 s**. The cluster runs stock settings — `argocd-cmd-params-cm` sets no backoff keys, the application controller carries no backoff flags, and the vendored chart's `values.yaml` contains none — so this is ArgoCD's default self-heal backoff behaviour.
+
+**On the base duration:** run 1's 1.5 s should not be read as the configured base. ArgoCD reacts to the first drift through its resource watch before any backoff has accumulated, so run 1 measures watch latency, not the backoff floor. The growth factor (~3) and the cap (~300 s) are the two parameters this data actually constrains; the configured base is not recoverable from it. Cite the measured curve, not an assumed constant.
 
 **Why this matters for the self-healing claim.** The honest statement is not "ArgoCD repairs drift in under 2 seconds." It is:
 

@@ -1,7 +1,16 @@
 # E8 — Steady-state platform overhead
 
 **Date:** 2026-10-11
-**Cluster:** 7 nodes — 3× Pi 5 control-plane, agent-7 (Pi 5), agent-10 (Pi 5), agent-67 (Pi 5, solar), mac-mini-agent (Apple Silicon, Asahi)
+**Cluster:** 7 nodes, 36 cores, ~49 GiB RAM
+
+| Node | Role | Hardware | OS | Cores | RAM |
+|---|---|---|---|---|---|
+| server-1/2/3 | control-plane, etcd | Raspberry Pi 5 (8 GB) | Ubuntu 24.04.5 | 4 each | 7.75 GiB each |
+| agent-7 | agent | Raspberry Pi 5 (**4 GB**) | Ubuntu 24.04.5 | 4 | 3.69 GiB |
+| agent-10 | agent | Raspberry Pi 5 (8 GB) | Ubuntu 24.04.5 | 4 | 7.75 GiB |
+| agent-67 | agent | **Mac mini (Apple Silicon), solar-powered** | Fedora Asahi Remix 44 | 8 | 7.37 GiB |
+| mac-mini-agent | agent | Mac mini (Apple Silicon) | Fedora Asahi Remix 44 | 8 | 7.37 GiB |
+
 **Method:** Prometheus instant queries against `monitoring-kube-prometheus-prometheus` (10.43.239.51:9090), issued from server-1
 **State during measurement:** idle — all pods Running, `camera-ingest` HPA at its floor of 1 replica, 0% CPU
 
@@ -39,8 +48,8 @@ Memory is reported from `MemAvailable`, not `MemFree`, so page cache that the ke
 | server-3 | control-plane, etcd | 8.4% | 2.15 GiB | 27.7% of 7.8 |
 | agent-7 | agent | 4.5% | 0.52 GiB | 14.0% of 3.7 |
 | agent-10 | agent | 0.8% | 0.51 GiB | 6.6% of 7.8 |
-| agent-67 | agent (solar) | 0.6% | 1.86 GiB | 25.3% of 7.4 |
-| mac-mini-agent | agent (Asahi) | 0.6% | 1.90 GiB | 25.8% of 7.4 |
+| agent-67 (Mac mini, solar) | agent | 0.6% | 1.86 GiB | 25.3% of 7.4 |
+| mac-mini-agent | agent | 0.6% | 1.90 GiB | 25.8% of 7.4 |
 
 ### Per namespace
 
@@ -57,7 +66,7 @@ Memory is reported from `MemAvailable`, not `MemFree`, so page cache that the ke
 
 ## What this proves
 
-**The platform is cheap in CPU and expensive in memory.** At rest the entire platform draws **201 mCPU — about 0.2 of a single core** spread across 28 ARM cores. CPU is not a constraint at idle, which is consistent with Test 3's finding that CPU sat at 2–8% even while disks saturated.
+**The platform is cheap in CPU and expensive in memory.** At rest the entire platform draws **201 mCPU — about 0.2 of a single core** spread across 36 ARM cores. CPU is not a constraint at idle, which is consistent with Test 3's finding that CPU sat at 2–8% even while disks saturated.
 
 Memory is the binding resource: **2.4 GiB of working set**, and the control-plane nodes are each committing 1.6–2.2 GiB before any tenant workload arrives.
 
