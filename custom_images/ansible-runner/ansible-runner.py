@@ -257,6 +257,12 @@ def is_provisioned(ip, role):
         return False
 
 
+def service_state(ssh, unit):
+    """systemd's one-word answer for a unit: active, activating, failed, inactive."""
+    _, stdout, _ = ssh.exec_command(f"systemctl is-active {unit} 2>/dev/null || true")
+    return stdout.read().decode().strip() or "unknown"
+
+
 def warn_if_stale_node_record(api, ssh, hostname):
     """Detect a re-flashed board whose server-side identity is now stale.
 
@@ -364,12 +370,20 @@ def provision(api, worker, server_url, token, role):
         sftp.close()
 
         # 2. Move artifacts into system locations atomically
+        #    `mv` keeps the SELinux label the file was given in /tmp
+        #    (user_tmp_t), and systemd is not allowed to execute that, so on
+        #    an enforcing host (Fedora) k3s-agent died with 203/EXEC
+        #    "Permission denied" on every start. restorecon gives the binary
+        #    the label its new path calls for. Hosts without SELinux tooling
+        #    (the Ubuntu Pis) have no restorecon and skip this.
         print("Moving artifacts into system locations...")
         _, stdout, stderr = ssh.exec_command(
             f"sudo mkdir -p {K3S_IMAGES_DIR} && "
             f"sudo mkdir -p /usr/local/bin && "
             f"sudo mv {K3S_BINARY_TMP} {K3S_BINARY_FINAL} && "
             f"sudo chmod +x {K3S_BINARY_FINAL} && "
+            f"sudo sh -c 'command -v restorecon >/dev/null 2>&1 && "
+            f"restorecon {K3S_BINARY_FINAL} || true' && "
             f"sudo chmod +x {K3S_INSTALL_SCRIPT_DEST} && "
             f"sudo mv {K3S_AIRGAP_IMAGES_DEST} "
             f"{K3S_IMAGES_DIR}/k3s-airgap-images-arm64.tar.zst"
@@ -407,17 +421,46 @@ def provision(api, worker, server_url, token, role):
         install_err = stderr.read().decode().strip()
         exit_code = stdout.channel.recv_exit_status()
 
-        if exit_code == 0:
-            print(f"Successfully provisioned {hostname} as {role}")
-            # The k3s binary was already moved into place by step 2, so only
-            # the install-script wrapper needs cleaning up.
-            ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
+        if exit_code != 0:
+            print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
             ssh.close()
-            return True
+            return False
 
-        print(f"Failed to provision {hostname} (exit {exit_code}): {install_err}")
+        # 4. Make sure the service is actually running.
+        #    The installer exiting 0 only proves the files are in place. It
+        #    starts the service only when what it installed differs from what
+        #    was already there, so on a node provisioned before whose agent
+        #    has since stopped it prints "No change detected so skipping
+        #    service start" and exits 0 — the node stayed down while every
+        #    sweep logged success.
+        #    `start`, not `restart`: a no-op on a unit that is already running
+        #    or already starting, so nothing in progress is interrupted.
+        #    --no-block because the k3s units set TimeoutStartSec=0; a blocking
+        #    start on a node that can never finish joining would hang this
+        #    single-threaded loop for every other node.
+        unit = "k3s" if role == "server" else "k3s-agent"
+        _, stdout, _ = ssh.exec_command(f"sudo systemctl start --no-block {unit}")
+        stdout.channel.recv_exit_status()
+
+        state = service_state(ssh, unit)
+        for _ in range(24):
+            if state != "activating":
+                break
+            time.sleep(5)
+            state = service_state(ssh, unit)
+
+        if state != "active":
+            print(f"Failed to provision {hostname}: installer exited 0 but "
+                  f"{unit} is '{state}', not active")
+            ssh.close()
+            return False
+
+        print(f"Successfully provisioned {hostname} as {role}")
+        # The k3s binary was already moved into place by step 2, so only
+        # the install-script wrapper needs cleaning up.
+        ssh.exec_command(f"rm -f {K3S_INSTALL_SCRIPT_DEST}")
         ssh.close()
-        return False
+        return True
 
     except Exception as e:
         # Deliberately references no locals from the try block — a failure
