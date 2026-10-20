@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly Gitea backup
+
+[Timer]
+OnCalendar={{ gitea_backup_schedule }}
+# Run on next boot if the machine was off when the timer was due — a node
+# that was down overnight should still take a backup rather than skip a day.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

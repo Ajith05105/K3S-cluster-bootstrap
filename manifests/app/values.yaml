@@ -1,0 +1,45 @@
+# Defaults for every app. A specific app's Application overrides only what
+# it needs to (appName, image.repository, image.tag at minimum) via its own
+# values source — see the multi-source Application pattern in
+# roles/bootstrap_gitops. Nothing here is developer-writable; only the
+# per-app values file (in that app's own repo under the `apps` org) is.
+
+appName: ""
+
+image:
+  repository: ""
+  tag: "initial"
+
+port: 8080
+
+ingress:
+  # Leave unset to skip creating an Ingress entirely.
+  host: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Per-container ceiling for this app's own namespace. A developer's
+# `resources:` above can ask for anything up to this without admin
+# involvement; asking for more is a hard API-server rejection, not silent
+# throttling. Raising the ceiling itself means editing this chart, admin-only.
+limitRange:
+  max:
+    cpu: "1"
+    memory: 1Gi
+  defaultRequest:
+    cpu: 100m
+    memory: 128Mi
+
+# Caps the total across every pod in this app's namespace (relevant once an
+# app scales beyond one replica) — separate from the per-container ceiling
+# above so a runaway replica count still can't starve the other 6 apps
+# sharing these 3 Pi 5s.
+quota:
+  cpu: "2"
+  memory: 2Gi

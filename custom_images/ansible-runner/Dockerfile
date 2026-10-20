@@ -1,6 +1,8 @@
 FROM python:3.11-slim
 
-RUN pip install kubernetes paramiko
+# Pinned to the versions the deployed runner is known to work with, so a
+# rebuild on another day or another machine produces the same runner.
+RUN pip install kubernetes==36.0.3 paramiko==5.0.0
 
 RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
 

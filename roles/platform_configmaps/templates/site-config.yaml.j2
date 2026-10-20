@@ -1,0 +1,36 @@
+# Per-site values, rendered from all.yml.
+#
+# The rule for this file: if a value differs between this cluster and someone
+# else's, it belongs here. That is the only test — not whether it is networky.
+#
+# It exists so workloads ArgoCD owns can stay plain, portable YAML while still
+# getting their values from all.yml. ArgoCD cannot render Ansible variables,
+# so anything under manifests/ that needs a per-site value reads it from here
+# via configMapKeyRef instead of hardcoding it.
+#
+# Ansible owns this ConfigMap, and it deliberately does NOT live under
+# manifests/ — everything in that directory is rsynced into cluster-config and
+# adopted by ArgoCD, which would put these values back into Git and defeat the
+# point.
+#
+# NON-SECRET VALUES ONLY. ConfigMaps are plaintext and readable by anything
+# with get access in kube-system. Never add k3s_token or gitea_admin_password.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: site-config
+  namespace: kube-system
+data:
+  # Control-plane VIP. Consumed by ansible-runner as KUBE_VIP_VIP, which puts
+  # it in a self-joined server's --tls-san. Must match what the kube-vip
+  # DaemonSet advertises.
+  kube_vip_vip: "{{ kube_vip_vip }}"
+
+  # LAN NTP server. Consumed by ansible-runner as NTP_SERVER — self-joined
+  # agents never run node_prep, so this is the only way they get a persistent
+  # time source. Something must actually serve NTP at this address.
+  cluster_ntp_server: "{{ cluster_ntp_server | default(gateway_ip) }}"
+
+  # Default route handed to nodes. Not consumed yet; here so the next
+  # ArgoCD-owned workload that needs it doesn't reintroduce a literal.
+  gateway_ip: "{{ gateway_ip }}"

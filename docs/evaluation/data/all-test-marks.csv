@@ -1,0 +1,82 @@
+2026-10-08T07:28:45.891Z,mark,drift test: changing a label on Service console by hand
+2026-10-08T07:45:26.591Z,mark,node plugged in
+2026-10-08T07:45:58.656Z,mark,power cut
+2026-10-09T04:59:28.663Z,mark,test1 dry run start
+2026-10-09T04:59:48.750Z,mark,test1 dry run end
+2026-10-09T05:00:25.975Z,mark,test1 load on at 50 fps
+2026-10-09T05:01:51.459Z,mark,test1 steady state start
+2026-10-09T05:02:21.511Z,mark,test1 ramp start to 120 fps
+2026-10-09T05:04:42.431Z,mark,test1 ABORTED before trigger B: agent-10 rebooted by itself during the ramp
+2026-10-09T05:21:01.387Z,mark,test1 run2: fresh start
+2026-10-09T05:21:08.628Z,mark,test1 run2: dry run start
+2026-10-09T05:21:28.683Z,mark,test1 run2: dry run end
+2026-10-09T05:21:47.771Z,mark,test1 run2: load on at 50 fps
+2026-10-09T05:23:08.231Z,mark,test1 run2: steady state start
+2026-10-09T05:23:38.281Z,mark,test1 run2: ramp start to 120 fps
+2026-10-09T05:25:14.839Z,mark,test1 run2: trigger B step 1: deleting node object agent-10
+2026-10-09T05:25:18.403Z,mark,test1 run2: trigger B step 3: registry row removed
+2026-10-09T05:34:05.897Z,mark,"test1 run2: end, load stopped"
+2026-10-09T07:08:50.824Z,mark,test1 run3: fresh start
+2026-10-09T07:08:55.988Z,mark,test1 run3: dry run start
+2026-10-09T07:09:16.043Z,mark,test1 run3: dry run end
+2026-10-09T07:09:32.972Z,mark,test1 run3: load on at 50 fps
+2026-10-09T07:16:02.142Z,mark,test1 v2: fresh start
+2026-10-09T07:16:08.315Z,mark,test1 v2: dry run start
+2026-10-09T07:16:28.370Z,mark,test1 v2: dry run end
+2026-10-09T07:16:30.423Z,mark,test1 v2: load on at 50 fps
+2026-10-09T07:18:05.957Z,mark,test1 v2: steady state start (stable 30 s)
+2026-10-09T07:18:36.064Z,mark,test1 v2: ramp start to 75 fps
+2026-10-09T07:20:06.605Z,mark,test1 v2: ramp settled at 13 pods
+2026-10-09T07:21:02.886Z,mark,test1 v2: trigger B step 1: deleting node object agent-10
+2026-10-09T07:21:06.201Z,mark,test1 v2: trigger B step 3: registry row removed
+2026-10-09T07:24:11.638Z,mark,"test1 v2: end, load stopped"
+2026-10-09T07:35:01.627Z,mark,test1 run3 split: fresh start
+2026-10-09T07:35:08.797Z,mark,test1 run3 split: dry run start
+2026-10-09T07:35:28.852Z,mark,test1 run3 split: dry run end
+2026-10-09T07:35:30.907Z,mark,test1 run3 split: load on at 50 fps
+2026-10-09T07:36:51.372Z,mark,test1 run3 split: steady state start (stable 30 s)
+2026-10-09T07:37:21.226Z,mark,test1 run3 split: ramp start to 75 fps
+2026-10-09T07:39:06.851Z,mark,"test1 run3 split: ramp settled at 14 pods, 0 pending"
+2026-10-09T07:43:43.310Z,mark,test1 run3 split: PHASE 2 node plugged in: removing registry row for agent-10
+2026-10-09T07:50:21.614Z,mark,"test1 run3 split: end, load stopped (recovery NOT clean, no manual nudge used)"
+2026-10-09T08:01:00.613Z,mark,t1 run4: fresh start
+2026-10-09T08:01:07.883Z,mark,t1 run4: dry run start
+2026-10-09T08:01:27.939Z,mark,t1 run4: dry run end
+2026-10-09T08:01:29.997Z,mark,t1 run4: load on at 50 fps
+2026-10-09T08:03:05.547Z,mark,t1 run4: steady state start (stable 30 s)
+2026-10-09T08:03:35.821Z,mark,t1 run4: ramp start to 75 fps
+2026-10-09T08:05:06.361Z,mark,"t1 run4: ramp settled at 13 pods, 0 pending"
+2026-10-09T08:08:53.781Z,mark,t1 run4: PHASE 1 node lost: stopping k3s-agent on agent-10
+2026-10-09T08:10:35.373Z,mark,t1 run4: PHASE 2 node plugged in: removing registry row for agent-10
+2026-10-09T08:12:15.268Z,mark,"t1 run4: recovery complete, clean (all pods serving, 0 failed frames)"
+2026-10-09T08:12:30.309Z,mark,"t1 run4: end, load stopped"
+2026-10-09T09:08:23.809Z,mark,"t1 run5: start, agent-10 powered off, only agent-7 Ready"
+2026-10-09T09:08:23.876Z,mark,t1 run5: step to 20 fps
+2026-10-09T09:09:24.983Z,mark,t1 run5: step to 40 fps
+2026-10-09T09:10:26.092Z,mark,t1 run5: step to 60 fps
+2026-10-09T09:11:27.203Z,mark,t1 run5: step to 80 fps
+2026-10-09T09:12:28.312Z,mark,t1 run5: step to 100 fps
+2026-10-09T09:13:29.388Z,mark,"t1 run5: CEILING at 100 fps: sustained drops, holding here"
+2026-10-09T09:15:35.198Z,mark,t1 run5: agent-10 Ready again (seen by the test script)
+2026-10-09T09:16:42.989Z,mark,"t1 run5: drops at 0 for 30 s, ramping demand down"
+2026-10-09T09:17:43.202Z,mark,"t1 run5: end, load stopped"
+2026-10-09T09:55:47.525Z,mark,"t1 run6: start, agent-10 powered off, only agent-7 Ready"
+2026-10-09T09:56:16.641Z,mark,t1 run6: step to 40 fps
+2026-10-09T09:57:17.747Z,mark,t1 run6: step to 80 fps
+2026-10-09T09:58:18.854Z,mark,t1 run6: step to 120 fps
+2026-10-09T09:59:19.962Z,mark,t1 run6: step to 160 fps
+2026-10-09T10:00:21.071Z,mark,"t1 run6: step to 180 fps, holding here"
+2026-10-09T10:00:57.151Z,mark,t1 run6: sustained drops at 180 fps on agent-7 alone; plug in agent-10
+2026-10-09T10:01:19.546Z,mark,t1 run6: agent-10 Ready again (seen by the test script)
+2026-10-09T10:02:08.543Z,mark,"t1 run6: drops at 0 for 25 s, load stopped; end"
+2026-10-09T10:36:52.260Z,mark,"t2 run1: start, agent-7 and agent-10 both Ready"
+2026-10-09T10:36:52.309Z,mark,t2 run1: step to 40 fps
+2026-10-09T10:37:53.417Z,mark,t2 run1: step to 70 fps
+2026-10-09T10:44:37.528Z,mark,"t2 run2: start, agent-7 and agent-10 both Ready"
+2026-10-09T10:44:45.753Z,mark,t2 run2: step to 40 fps
+2026-10-09T10:45:46.865Z,mark,t2 run2: step to 70 fps
+2026-10-09T10:47:23.653Z,mark,"t2 run2: steady at 70 fps, 0 drops for 30 s; pull power on one Pi now"
+2026-10-09T10:49:11.718Z,mark,t2 run2: first failed frames seen by the test script
+2026-10-09T10:49:57.188Z,mark,t2 run2: agent-10 NotReady (seen by the test script)
+2026-10-09T10:50:23.046Z,mark,t2 run2: replacement pod Ready on agent-7; agent-7 now has 7
+2026-10-09T10:50:32.746Z,mark,"t2 run2: drops at 0 for 30 s, load stopped; end"

@@ -1,3 +1,11 @@
+# Ansible-owned, not ArgoCD — same rule already applied to kube-vip's
+# DaemonSet: an object needing a per-site value cannot be plain static YAML,
+# because ArgoCD/rsync never render Jinja and Kubernetes has no way to source
+# an image tag from a ConfigMap the way it can an env var.
+#
+# ArgoCD's platform-dnsmasq Application still watches manifests/dnsmasq/, but
+# only serviceaccount.yml lives there now — this file is deliberately outside
+# that path so it can never be pruned or reverted out from under Ansible.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,7 +31,11 @@ spec:
       serviceAccountName: lease-watcher
       containers:
         - name: dnsmasq
-          image: dockurr/dnsmasq:latest
+          # Pinned via skopeo — verified with `skopeo list-tags` to publish a
+          # real arm64 build. Must match preflight.yml's skopeo copy task:
+          # containerd's local store is keyed by tag, and imagePullPolicy:
+          # Never means there is no fallback pull if the tags disagree.
+          image: dockurr/dnsmasq:{{ dnsmasq_version }}
           imagePullPolicy: Never
           securityContext:
             capabilities:

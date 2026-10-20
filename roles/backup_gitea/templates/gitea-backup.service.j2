@@ -1,0 +1,8 @@
+[Unit]
+Description=Gitea backup (streams gitea dump to local disk)
+After=k3s.service
+Requires=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gitea-backup.sh

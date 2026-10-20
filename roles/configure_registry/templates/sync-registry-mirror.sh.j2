@@ -1,0 +1,44 @@
+#!/bin/bash
+# Keeps this server's registries.yaml (local registry) pointed at Gitea's current ClusterIP.
+# Runs as a systemd timer (see k3s-registry-reconcile.timer) — not a one-shot
+# bootstrap step. Restarts k3s ONLY if the file actually changed: a k3s
+# restart on a server cycles the API server, controller-manager, scheduler,
+# and this node's etcd connection, not just containerd, so it must never fire
+# on a bare timer tick with nothing to correct.
+set -euo pipefail
+
+KUBECONFIG_PATH=/etc/rancher/k3s/k3s.yaml
+REGISTRY_HOST="gitea.cluster.local:3000"
+REGISTRIES_FILE=/etc/rancher/k3s/registries.yaml
+
+CURRENT_IP=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get svc gitea-http -n gitea \
+  -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+
+if [ -z "${CURRENT_IP}" ]; then
+  # Gitea's Service doesn't exist yet (e.g. this fires during initial
+  # bootstrap, before deploy_gitea has run) — nothing to correct this cycle,
+  # not an error. The next tick picks it up once Gitea exists.
+  exit 0
+fi
+
+
+DESIRED=$(cat <<EOF
+mirrors:
+  "${REGISTRY_HOST}":
+    endpoint:
+      - "http://${CURRENT_IP}:3000"
+configs:
+  "${REGISTRY_HOST}":
+    tls:
+      insecure_skip_verify: true
+EOF
+)
+
+if [ -f "${REGISTRIES_FILE}" ] && [ "$(cat "${REGISTRIES_FILE}")" = "${DESIRED}" ]; then
+  exit 0
+fi
+
+mkdir -p "$(dirname "${REGISTRIES_FILE}")"
+echo "${DESIRED}" > "${REGISTRIES_FILE}"
+echo "registries.yaml updated (Gitea ClusterIP -> ${CURRENT_IP}), restarting k3s..."
+systemctl restart k3s
